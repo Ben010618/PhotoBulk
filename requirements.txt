@@ -1,0 +1,21 @@
+# ==============================================================================
+# KameraPh AI Studio Suite: Production Pinned Dependencies
+# Python 3.11+ / 3.13 Compatible
+# ==============================================================================
+fastapi==0.116.1
+uvicorn==0.35.0
+python-multipart==0.0.20
+pydantic==2.13.5
+opencv-python==4.11.0.86
+numpy==2.5.3
+Pillow==12.3.0
+reportlab==5.0.1
+qrcode==8.2
+requests==2.32.3
+boto3==1.43.102
+botocore==1.43.102
+python-dotenv==1.2.3
+rembg==2.0.85
+onnxruntime==1.30.0
+pytest==9.1.1
+httpx==0.28.1

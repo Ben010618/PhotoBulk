@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kameraph-backend:latest
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - sqlite_data:/app/data
+      - local_storage:/app/local_storage
+      - temp_exports:/app/temp_exports
+      - backups:/app/backups
+    environment:
+      - PORT=8000
+      - ENVIRONMENT=production
+    networks:
+      - kameraph-network
+    expose:
+      - "8000"
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      - web
+    networks:
+      - kameraph-network
+
+volumes:
+  sqlite_data:
+  local_storage:
+  temp_exports:
+  backups:
+  certbot_www:
+
+networks:
+  kameraph-network:
+    driver: bridge
