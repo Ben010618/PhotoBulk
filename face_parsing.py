@@ -28,14 +28,22 @@ BISENET_MODEL_PATH = BASE_DIR / "bisenet_face_parsing.onnx"
 _PARSER_SESSION = None
 
 
+def has_bisenet_model() -> bool:
+    """Returns True if the BiSeNet ONNX model weight file is present on disk."""
+    return BISENET_MODEL_PATH.is_file()
+
+
 def get_parsing_session():
     """Initializes or returns cached onnxruntime session for BiSeNet face parsing."""
     global _PARSER_SESSION
     if _PARSER_SESSION is not None:
         return _PARSER_SESSION
 
-    if not BISENET_MODEL_PATH.exists():
-        logger.info(f"BiSeNet model not found at {BISENET_MODEL_PATH}. Checking online or fallback...")
+    if not has_bisenet_model():
+        logger.info(
+            "BiSeNet face parsing model not found at %s. Geometric anatomical fallback is active.",
+            BISENET_MODEL_PATH
+        )
         return None
 
     try:
@@ -44,7 +52,7 @@ def get_parsing_session():
         logger.info("Initialized BiSeNet Face Parsing ONNX session.")
         return _PARSER_SESSION
     except Exception as e:
-        logger.warning(f"Could not initialize BiSeNet session: {e}")
+        logger.warning(f"Could not initialize BiSeNet session: {e}. Falling back to geometric masks.")
         return None
 
 
@@ -117,6 +125,7 @@ def get_face_parsing_masks(
             logger.warning(f"BiSeNet parsing inference failed: {e}. Falling back to geometric masks.")
 
     # High-precision anatomical geometric fallback using YuNet landmarks
+    logger.info("BiSeNet model inactive or unavailable; anatomical geometric fallback is active.")
     return _build_geometric_parsing_masks(img_bgr, face_info)
 
 

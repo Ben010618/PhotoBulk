@@ -1,7 +1,7 @@
 # KameraPh (PhotoBulk) — AI Academic Portrait & Regalia Platform
 
 [![CI Pipeline](https://github.com/Ben010618/PhotoBulk/actions/workflows/ci.yml/badge.svg)](https://github.com/Ben010618/PhotoBulk/actions/workflows/ci.yml)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.116-green.svg)](https://fastapi.tiangolo.com/)
 [![React 19](https://img.shields.io/badge/React-19.0-61dafb.svg)](https://react.dev/)
 [![Compliance](https://img.shields.io/badge/Compliance-RA%2010173%20(DPA)-darkgreen.svg)](PRIVACY_AND_COMPLIANCE_RA10173.md)
@@ -113,7 +113,7 @@ cp .env.example .env
 ## Getting Started
 
 ### Prerequisites
-- Python 3.11 or 3.13
+- Python 3.12+
 - Node.js 18+ and npm
 - (Optional) Docker & Docker Compose
 

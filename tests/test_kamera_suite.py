@@ -22,11 +22,17 @@ import numpy as np
 import tempfile
 import io
 import zipfile
+import skimage.data
 from fastapi.testclient import TestClient
 from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
+
+# Fallback isolated temp directory if run standalone without conftest.py
+if "DATA_DIR" not in os.environ:
+    _standalone_temp = tempfile.mkdtemp(prefix="kameraph_standalone_test_")
+    os.environ["DATA_DIR"] = _standalone_temp
 
 from init_db import init_database, get_db_connection, fetch_job_db
 from auth import create_access_token
@@ -47,32 +53,34 @@ from pipeline import (
     generate_watermarked_proof
 )
 from api_server import app, BATCH_STORE, sanitize_filename_or_folder, deduct_studio_credit, get_studio_state
+import config
+import export_engine
+import project_store
 
 
 class TestKameraPhSuite(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Guarantee DATA_DIR points to isolated temp dir
+        test_data_dir = Path(os.environ.get("DATA_DIR")).resolve()
+        config.DATA_DIR = test_data_dir
+        config.PROJECTS_DIR = test_data_dir / "projects"
+        config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+        export_engine.DATA_DIR = test_data_dir
+        export_engine.EXPORTS_DIR = test_data_dir / "exports"
+        export_engine.EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        project_store.project_store.base_dir = config.PROJECTS_DIR
+
         cls.db_path = init_database()
         cls.client = TestClient(app)
         
-        # Load synthetic test fixture image
-        fixture_path = os.path.join(BASE_DIR, "tests", "fixtures", "synthetic_portrait.jpg")
-        if os.path.exists(fixture_path):
-            cls.test_img = cv2.imread(fixture_path)
-        else:
-            cls.test_img = np.full((800, 600, 3), (220, 220, 220), dtype=np.uint8)
-            cv2.ellipse(cls.test_img, (300, 350), (90, 120), 0, 0, 360, (135, 170, 210), -1)
+        # Real human portrait fixtures generated at test time (zero PII, RA 10173 compliant)
+        cls.astronaut_bgr = cv2.cvtColor(skimage.data.astronaut(), cv2.COLOR_RGB2BGR)
+        cls.astronaut_dark = cv2.convertScaleAbs(cls.astronaut_bgr, alpha=0.45, beta=0)
+        cls.astronaut_3000 = cv2.resize(cls.astronaut_bgr, (3000, 3000), interpolation=cv2.INTER_CUBIC)
 
-        # Load real/synthetic face portrait fixture (with detectable face)
-        face_fixture_path = os.path.join(BASE_DIR, "tests", "fixtures", "sample_grad_face.jpg")
-        if os.path.exists(face_fixture_path):
-            cls.face_img = cv2.imread(face_fixture_path)
-        else:
-            alt_path = os.path.join(BASE_DIR, "local_storage", "Juan_DelaCruz_Graduation_Proof_KameraPh_Enhanced.jpg")
-            if os.path.exists(alt_path):
-                cls.face_img = cv2.imread(alt_path)
-            else:
-                cls.face_img = cls.test_img
+        cls.test_img = cls.astronaut_bgr
+        cls.face_img = cls.astronaut_bgr
 
     def test_01_database_and_rls_schema(self):
         """Verify database tables and seeded records exist."""
@@ -705,10 +713,7 @@ class TestKameraPhSuite(unittest.TestCase):
         """STEP 3: Verify soft alpha matte retains fractional edge values and test backdrop modes."""
         from background_engine import clean_original_backdrop, generate_studio_backdrop, composite_subject_onto_backdrop, STUDIO_BACKDROPS
         
-        face_path = Path(__file__).parent / "fixtures" / "sample_grad_face.jpg"
-        if not face_path.exists():
-            self.skipTest("sample_grad_face.jpg fixture not found")
-        img = cv2.imread(str(face_path))
+        img = self.face_img
         
         # Get neural subject mask
         mask = get_subject_mask(img)
@@ -752,10 +757,7 @@ class TestKameraPhSuite(unittest.TestCase):
 
     def test_22_smart_ai_analysis_exposure_and_autocorrections(self):
         """STEP 5: Validate smart portrait analysis metrics and automatic corrections."""
-        face_path = Path(__file__).parent / "fixtures" / "sample_grad_face.jpg"
-        if not face_path.exists():
-            self.skipTest("sample_grad_face.jpg fixture not found")
-        img = cv2.imread(str(face_path))
+        img = self.face_img
 
         analysis = analyze_portrait(img)
         self.assertTrue(analysis["has_face"])
@@ -787,11 +789,8 @@ class TestKameraPhSuite(unittest.TestCase):
         from beautification_presets import BEAUTY_PRESETS, apply_beauty_preset_to_image, cleanup_flyaway_hair_alpha
         from face_parsing import get_face_parsing_masks
         
-        face_path = Path(__file__).parent / "fixtures" / "sample_grad_face.jpg"
-        if not face_path.exists():
-            self.skipTest("sample_grad_face.jpg fixture not found")
-        img = cv2.imread(str(face_path))
-        face_info = {"bbox": [320, 200, 380, 420]}
+        img = self.face_img
+        face_info = {"bbox": [178, 62, 89, 113]}
 
         # 1. Verify semantic face parsing masks
         masks = get_face_parsing_masks(img, face_info)
@@ -950,6 +949,55 @@ class TestKameraPhSuite(unittest.TestCase):
                 self.assertAlmostEqual(dpi[0], 300, delta=1)
                 self.assertAlmostEqual(dpi[1], 300, delta=1)
                 self.assertIn("icc_profile", pil_img.info)
+
+    def test_26_phase0_temporary_data_dir_isolation(self):
+        """Phase 0: Tests must use a temporary DATA_DIR and never write into local_data."""
+        from config import DATA_DIR, BASE_DIR
+        local_data_dir = BASE_DIR / "local_data"
+        self.assertNotEqual(str(DATA_DIR), str(local_data_dir), "DATA_DIR must be an isolated temporary directory during testing")
+        # Assert that local_data/projects is completely empty
+        local_projects = list((local_data_dir / "projects").glob("*"))
+        self.assertEqual(len(local_projects), 0, f"local_data/projects must not contain test projects: {local_projects}")
+        local_exports = list((local_data_dir / "exports").glob("*"))
+        self.assertEqual(len(local_exports), 0, f"local_data/exports must not contain test exports: {local_exports}")
+
+    def test_27_phase0_astronaut_face_detection_variants(self):
+        """Phase 0: Face detection must pass on standard astronaut, darkened copy, and 3000px upscaled copy."""
+        # 1. Standard astronaut
+        res_std = analyze_portrait(self.astronaut_bgr)
+        self.assertTrue(res_std["has_face"], "Face must be detected on standard astronaut portrait")
+        self.assertEqual(res_std["face_count"], 1)
+
+        # 2. Darkened copy
+        res_dark = analyze_portrait(self.astronaut_dark)
+        self.assertTrue(res_dark["has_face"], "Face must be detected on darkened astronaut portrait")
+        self.assertEqual(res_dark["face_count"], 1)
+
+        # 3. 3000px upscaled copy
+        res_3000 = analyze_portrait(self.astronaut_3000)
+        self.assertTrue(res_3000["has_face"], "Face must be detected on 3000px upscaled astronaut portrait")
+        self.assertEqual(res_3000["face_count"], 1)
+
+    def test_28_phase0_bisenet_missing_model_and_fallback(self):
+        """Phase 0: Verify missing-model check and that geometric anatomical fallback is active."""
+        from face_parsing import has_bisenet_model, get_face_parsing_masks, _build_geometric_parsing_masks
+        
+        # Check has_bisenet_model returns boolean
+        model_exists = has_bisenet_model()
+        self.assertIsInstance(model_exists, bool)
+
+        # Test geometric fallback directly
+        face_info = {"bbox": [178, 62, 89, 113]}
+        masks = _build_geometric_parsing_masks(self.astronaut_bgr, face_info)
+        for key in ["skin", "facial_skin", "hair", "eyes", "brows", "lips", "neck", "hat", "cloth"]:
+            self.assertIn(key, masks)
+            self.assertEqual(masks[key].shape, self.astronaut_bgr.shape[:2])
+
+        # Test get_face_parsing_masks generates all masks
+        all_masks = get_face_parsing_masks(self.astronaut_bgr, face_info)
+        for key in ["skin", "facial_skin", "hair", "eyes", "brows", "lips", "neck", "hat", "cloth"]:
+            self.assertIn(key, all_masks)
+            self.assertEqual(all_masks[key].shape, self.astronaut_bgr.shape[:2])
 
 
 if __name__ == "__main__":

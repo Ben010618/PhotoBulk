@@ -19,3 +19,6 @@ rembg==2.0.85
 onnxruntime==1.30.0
 pytest==9.1.1
 httpx==0.28.1
+google-genai==2.23.0
+scikit-image==0.26.0
+bcrypt==4.2.1
