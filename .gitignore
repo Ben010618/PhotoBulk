@@ -73,3 +73,4 @@ yarn-error.log*
 .idea/
 .DS_Store
 Thumbs.db
+bisenet_face_parsing.onnx

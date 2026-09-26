@@ -96,18 +96,22 @@ class ProcessingParams(BaseModel):
     backdrop_type: str = "royal_navy"
     beauty_preset: str = "morena_radiant"
     regalia_profile: str = "standard_toga"
-    skin_smoothing: float = Field(default=0.65, ge=0.0, le=1.0)
-    blemish_cut: float = Field(default=0.75, ge=0.0, le=1.0)
-    dark_spot_whitening: float = Field(default=0.50, ge=0.0, le=1.0)
-    shine_reduction: float = Field(default=0.35, ge=0.0, le=1.0)
+    skin_smoothing: float = Field(default=0.50, ge=0.0, le=1.0)
+    blemish_cut: float = Field(default=0.60, ge=0.0, le=1.0)
+    spot_correction: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    dark_spot_whitening: float = Field(default=0.40, ge=0.0, le=1.0)
+    keep_moles: bool = True
+    loose_hair_cleanup: float = Field(default=0.40, ge=0.0, le=1.0)
+    cleanup_loose_hair: bool = True
+    shine_reduction: float = Field(default=0.30, ge=0.0, le=1.0)
     lip_color: str = "#d87093"
-    lip_intensity: float = Field(default=0.35, ge=0.0, le=1.0)
-    glow_intensity: float = Field(default=0.40, ge=0.0, le=1.0)
-    eye_catchlight: float = Field(default=0.35, ge=0.0, le=1.0)
-    teeth_whitening: float = Field(default=0.50, ge=0.0, le=1.0)
+    lip_intensity: float = Field(default=0.0, ge=0.0, le=1.0)
+    glow_intensity: float = Field(default=0.20, ge=0.0, le=1.0)
+    eye_catchlight: float = Field(default=0.20, ge=0.0, le=1.0)
+    teeth_whitening: float = Field(default=0.40, ge=0.0, le=1.0)
     lighting_temp: str = "neutral_5500k"
     studio_light_intensity: float = Field(default=0.20, ge=0.0, le=1.0)
-    rim_light_boost: float = Field(default=0.20, ge=0.0, le=1.0)
+    rim_light_boost: float = Field(default=0.18, ge=0.0, le=1.0)
     iron_strength: float = Field(default=0.70, ge=0.0, le=1.0)
     output_directory: Optional[str] = None
     save_crops: bool = True
@@ -312,42 +316,64 @@ def detect_actual_engine() -> str:
 def process_complete_workflow(
     img_bgr: np.ndarray,
     bg_replacement_enabled: bool = True,
-    backdrop_type: str = "royal_navy",
-    beauty_preset: str = "morena_radiant",
-    regalia_profile: str = "standard_toga",
-    skin_smoothing: float = 0.65,
-    blemish_cut: float = 0.75,
-    dark_spot_whitening: float = 0.50,
-    shine_reduction: float = 0.35,
-    lip_color: str = "#d87093",
-    lip_intensity: float = 0.35,
-    glow_intensity: float = 0.40,
-    eye_catchlight: float = 0.35,
-    teeth_whitening: float = 0.50,
+    backdrop_type: str = "classic_blue",
+    beauty_preset: str = "natural",
+    regalia_profile: Optional[str] = "standard_toga",
+    skin_smoothing: Optional[float] = None,
+    blemish_cut: Optional[float] = None,
+    spot_correction: Optional[float] = None,
+    dark_spot_whitening: Optional[float] = None,
+    shine_reduction: Optional[float] = None,
+    lip_color: Optional[str] = None,
+    lip_intensity: Optional[float] = None,
+    glow_intensity: Optional[float] = None,
+    eye_catchlight: Optional[float] = None,
+    teeth_whitening: Optional[float] = None,
     lighting_temp: str = "neutral_5500k",
-    studio_light_intensity: float = 0.20,
-    rim_light_boost: float = 0.20,
-    iron_strength: float = 0.70,
+    studio_light_intensity: Optional[float] = None,
+    rim_light_boost: Optional[float] = None,
+    iron_strength: Optional[float] = None,
     analysis_data: Optional[Dict[str, Any]] = None,
-    backdrop_mode: Optional[str] = None
+    backdrop_mode: Optional[str] = None,
+    loose_hair_cleanup: Optional[float] = None,
+    keep_moles: bool = True
 ) -> Tuple[np.ndarray, int, Optional[Dict[str, Any]], str]:
     """
     Executes the full graduation photo processing workflow:
-      1. Regalia-specific parameter adjustment
-      2. Neural subject matting (rembg)
+      1. Regalia-specific default parameters (defaults only, never overwriting user sliders)
+      2. Neural subject matting (rembg soft alpha + optional flyaway hair smoothing)
       3. Studio backdrop compositing (replace, clean original, or keep)
-      4. Skin retouching, blemish healing, melanin radiance, catchlights
-      5. Real elapsed latency and hardware engine reporting
+      4. Smart auto-corrections from portrait analysis
+      5. Semantic face-parsing retouching, blemish healing (preserving moles), even skin tone
+      6. Real elapsed latency and hardware engine reporting
     """
     start_time = time.time()
     h, w = img_bgr.shape[:2]
 
-    # Incorporate Regalia Profile Defaults if selected
-    if regalia_profile in REGALIA_PROFILES:
-        r_prof = REGALIA_PROFILES[regalia_profile]
-        iron_strength = r_prof.get("iron_strength", iron_strength)
-        skin_smoothing = r_prof.get("skin_smoothing", skin_smoothing)
-        shine_reduction = r_prof.get("shine_reduction", shine_reduction)
+    # Regalia Profile: use profile values ONLY as defaults if user has not set custom values
+    r_prof = REGALIA_PROFILES.get(regalia_profile, {}) if regalia_profile else {}
+    if iron_strength is None:
+        iron_strength = r_prof.get("iron_strength", 0.70)
+    if skin_smoothing is None:
+        skin_smoothing = r_prof.get("skin_smoothing", 0.50)
+    if blemish_cut is None:
+        blemish_cut = r_prof.get("blemish_cut", 0.60)
+    if spot_correction is None:
+        spot_correction = dark_spot_whitening if dark_spot_whitening is not None else r_prof.get("dark_spot_whitening", 0.40)
+    if shine_reduction is None:
+        shine_reduction = r_prof.get("shine_reduction", 0.30)
+    if studio_light_intensity is None:
+        studio_light_intensity = 0.20
+    if rim_light_boost is None:
+        rim_light_boost = 0.18
+    if glow_intensity is None:
+        glow_intensity = 0.20
+    if eye_catchlight is None:
+        eye_catchlight = 0.20
+    if teeth_whitening is None:
+        teeth_whitening = 0.40
+    if lip_intensity is None:
+        lip_intensity = 0.0
 
     # 1. Portrait Analysis & Face Geometry
     analysis = analysis_data or analyze_portrait(img_bgr)
@@ -368,6 +394,11 @@ def process_complete_workflow(
 
     # 2. High-Fidelity Subject Segmentation (fractional soft alpha)
     subject_mask = get_subject_mask(img_bgr, face_info)
+
+    # Loose flyaway hair smoothing on outer silhouette
+    if loose_hair_cleanup and loose_hair_cleanup > 0.05:
+        from beautification_presets import cleanup_flyaway_hair_alpha
+        subject_mask = cleanup_flyaway_hair_alpha(subject_mask, strength=loose_hair_cleanup)
 
     # 3. Studio Backdrop Handling ('replace', 'clean', or 'keep')
     mode = backdrop_mode or ("replace" if bg_replacement_enabled else "keep")
@@ -408,7 +439,8 @@ def process_complete_workflow(
             custom_adjustments={
                 "skin_smoothing": skin_smoothing,
                 "blemish_cut": blemish_cut,
-                "dark_spot_whitening": dark_spot_whitening,
+                "spot_correction": spot_correction,
+                "dark_spot_whitening": spot_correction,
                 "shine_reduction": shine_reduction,
                 "lip_color": lip_color,
                 "lip_intensity": lip_intensity,
@@ -418,7 +450,9 @@ def process_complete_workflow(
                 "lighting_temp": lighting_temp,
                 "studio_light_intensity": studio_light_intensity,
                 "rim_light_boost": rim_light_boost,
-                "iron_strength": iron_strength
+                "iron_strength": iron_strength,
+                "loose_hair_cleanup": loose_hair_cleanup or 0.40,
+                "keep_moles": keep_moles
             }
         )
 
@@ -475,6 +509,7 @@ def process_image(
             regalia_profile=params.regalia_profile,
             skin_smoothing=params.skin_smoothing,
             blemish_cut=params.blemish_cut,
+            spot_correction=params.spot_correction,
             dark_spot_whitening=params.dark_spot_whitening,
             shine_reduction=params.shine_reduction,
             lip_color=params.lip_color,
@@ -485,7 +520,9 @@ def process_image(
             lighting_temp=params.lighting_temp,
             studio_light_intensity=params.studio_light_intensity,
             rim_light_boost=params.rim_light_boost,
-            iron_strength=params.iron_strength
+            iron_strength=params.iron_strength,
+            loose_hair_cleanup=params.loose_hair_cleanup,
+            keep_moles=params.keep_moles
         )
 
         # 3. Compute High-Precision Standard Prints

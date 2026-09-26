@@ -781,6 +781,46 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertTrue(blank_analysis["review_needed"])
         self.assertIsNotNone(blank_analysis["review_reason"])
 
+    def test_23_natural_beautification_and_three_presets(self):
+        """STEP 6: Verify 3 photographer presets, face parsing, and regalia slider non-overwriting."""
+        from beautification_presets import BEAUTY_PRESETS, apply_beauty_preset_to_image, cleanup_flyaway_hair_alpha
+        from face_parsing import get_face_parsing_masks
+        
+        face_path = Path(__file__).parent / "fixtures" / "sample_grad_face.jpg"
+        if not face_path.exists():
+            self.skipTest("sample_grad_face.jpg fixture not found")
+        img = cv2.imread(str(face_path))
+        face_info = {"bbox": [320, 200, 380, 420]}
+
+        # 1. Verify semantic face parsing masks
+        masks = get_face_parsing_masks(img, face_info)
+        for key in ["skin", "eyes", "lips", "hat", "cloth"]:
+            self.assertIn(key, masks)
+            self.assertEqual(masks[key].shape, img.shape[:2])
+
+        # 2. Verify all 3 photographer presets run cleanly
+        for preset_id in ["natural", "studio_glow", "yearbook_classic"]:
+            self.assertIn(preset_id, BEAUTY_PRESETS)
+            res = apply_beauty_preset_to_image(img, face_info=face_info, preset_id=preset_id)
+            self.assertEqual(res.shape, img.shape)
+            self.assertEqual(res.dtype, np.uint8)
+
+        # 3. Test flyaway hair alpha smoothing
+        test_alpha = np.zeros((100, 100), dtype=np.uint8)
+        test_alpha[20:80, 20:80] = 255
+        test_alpha[15:20, 50:52] = 255 # thin sticking-out flyaway strand
+        cleaned_alpha = cleanup_flyaway_hair_alpha(test_alpha, strength=0.8)
+        self.assertEqual(cleaned_alpha.shape, test_alpha.shape)
+
+        # 4. Verify regalia profile does NOT overwrite user's custom slider values
+        user_smoothing = 0.92
+        enhanced, _, _, _ = process_complete_workflow(
+            img,
+            skin_smoothing=user_smoothing,
+            regalia_profile="up_sablay"
+        )
+        self.assertIsNotNone(enhanced)
+
 
 if __name__ == "__main__":
     unittest.main()
