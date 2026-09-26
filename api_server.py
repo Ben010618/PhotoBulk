@@ -24,10 +24,14 @@ import json
 import hashlib
 import tempfile
 import asyncio
+import logging
+import traceback
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 from PIL import Image
 import cv2
 import numpy as np
+from pydantic import BaseModel, Field
 
 from fastapi import FastAPI, File, UploadFile, Form, Query, Request, Header, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,10 +45,18 @@ try:
 except ImportError:
     pass
 
+logger = logging.getLogger("kameraph.api_server")
+
 from init_db import get_db_connection, init_database
 from auth import get_current_user, get_current_user_optional, require_admin, authenticate_user, create_access_token
-from r2_storage import storage
+from r2_storage import (
+    storage,
+    PresignedUploadResult,
+    PresignedDownloadResult,
+    LOCAL_STORAGE_DIR
+)
 from payment_engine import payment_engine
+from webhook_verifier import verify_paymongo_webhook, PayMongoWebhookResult, webhook_verifier
 from background_engine import generate_studio_backdrop, composite_subject_onto_backdrop, STUDIO_BACKDROPS
 from beautification_presets import BEAUTY_PRESETS, LIP_COLOR_PALETTES
 from analyzer_engine import analyze_portrait
@@ -52,6 +64,9 @@ from regalia_profiles import REGALIA_PROFILES
 from pdf_engine import generate_contact_sheet_pdf, generate_lab_gang_sheet_pdf, generate_batch_lab_gang_sheet_pdf
 from watermark_engine import generate_watermarked_proof
 from pipeline import (
+    process_image,
+    ProcessingParams,
+    ProcessedImageResult,
     process_complete_workflow,
     crop_8r_aspect,
     crop_2x2_id,
@@ -60,8 +75,29 @@ from pipeline import (
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STORAGE_DIR = os.path.join(BASE_DIR, "local_storage")
-os.makedirs(STORAGE_DIR, exist_ok=True)
+STORAGE_DIR = str(LOCAL_STORAGE_DIR)
+LOCAL_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Pydantic Schemas for R2 Direct Edge Storage
+class PresignedUploadRequest(BaseModel):
+    filename: str
+    content_type: str = "image/jpeg"
+    expires_in: int = 3600
+
+
+class PresignedDownloadRequest(BaseModel):
+    file_key: str
+    expires_in: int = 86400
+
+
+class RegisterPhotoRequest(BaseModel):
+    file_key: str
+    filename: str
+
+
+class RegisterPhotoResponse(BaseModel):
+    success: bool
+    item: Dict[str, Any]
 
 # Auto-instantiate database schema
 init_database()
@@ -170,7 +206,10 @@ def deduct_studio_credit(studio_id: Optional[str] = None, count: int = 1) -> boo
 
 def sanitize_filename_or_folder(name: str) -> str:
     """Sanitizes user input for headers and zip directories against path traversal."""
-    cleaned = re.sub(r'[^a-zA-Z0-9_\- ]', '_', name).strip()
+    # Prevent directory traversal
+    no_traversal = name.replace("..", "_").replace("/", "_").replace("\\", "_")
+    cleaned = re.sub(r'[^a-zA-Z0-9_\-\. ]', '_', no_traversal).strip()
+    cleaned = re.sub(r'^\.+', '', cleaned)
     return cleaned if cleaned else "Graduation_Cohort_2026"
 
 
@@ -487,22 +526,24 @@ def create_checkout(
     return result
 
 
-@app.post("/api/payments/webhook")
-async def payment_webhook_endpoint(request: Request, paymongo_signature: Optional[str] = Header(None)):
-    """Handles signed asynchronous callbacks from PayMongo."""
-    raw_body = await request.body()
+@app.post("/api/payments/webhook", response_model=PayMongoWebhookResult)
+async def payment_webhook_endpoint(
+    event_data: Dict[str, Any] = Depends(verify_paymongo_webhook)
+):
+    """
+    Cryptographically verified PayMongo webhook handler.
+    Guaranteed:
+      - Valid HMAC-SHA256 signature
+      - Timestamp replay protection (< 300s drift)
+      - Idempotent credit top-up
+      - Zero silent failures
+    """
     try:
-        event_data = json.loads(raw_body.decode('utf-8'))
-    except Exception:
-        raise HTTPException(status_code=400, detail="Malformed JSON webhook payload")
-
-    # Strictly verify signature if secret configured or live
-    is_valid = payment_engine.verify_webhook_signature(raw_body, paymongo_signature or "")
-    if not is_valid:
-        raise HTTPException(status_code=401, detail="Invalid PayMongo webhook signature")
-
-    result = payment_engine.handle_webhook_event(event_data)
-    return result
+        result = payment_engine.handle_webhook_event(event_data)
+        return PayMongoWebhookResult(**result)
+    except Exception as e:
+        logger.error(f"[api_server] Error processing verified payment webhook: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Webhook processing error: {str(e)}")
 
 
 # =========================================================================
@@ -510,32 +551,147 @@ async def payment_webhook_endpoint(request: Request, paymongo_signature: Optiona
 # =========================================================================
 
 @app.get("/api/storage/presigned-url")
-def get_presigned_url(file_key: str = Query(...), action: str = Query("upload")):
-    if action == "upload":
-        return storage.generate_presigned_upload_url(file_key)
-    else:
-        return {"download_url": storage.generate_presigned_download_url(file_key), "file_key": file_key}
+def get_presigned_url(
+    file_key: str = Query(...),
+    action: str = Query("upload"),
+    content_type: str = Query("image/jpeg"),
+    expires_in: int = Query(3600)
+):
+    """
+    Returns a pre-signed URL for direct browser edge upload or zero-egress download.
+    Zero Silent Failures: Catches ClientError and falls back gracefully.
+    """
+    try:
+        if action == "upload":
+            return storage.generate_presigned_upload_url(
+                file_key=file_key,
+                content_type=content_type,
+                expires_in=expires_in
+            )
+        else:
+            return storage.generate_presigned_download_url(
+                file_key=file_key,
+                expires_in=expires_in
+            )
+    except Exception as e:
+        logger.error(f"[api_server] Error generating presigned URL for {file_key}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate presigned URL: {str(e)}")
+
+
+@app.post("/api/storage/presigned-upload", response_model=PresignedUploadResult)
+def post_presigned_upload(req: PresignedUploadRequest):
+    """
+    Pydantic-typed endpoint for generating direct edge upload URLs.
+    """
+    try:
+        safe_key = f"{int(time.time()*1000)}_{sanitize_filename_or_folder(req.filename)}"
+        return storage.generate_presigned_upload_url(
+            file_key=safe_key,
+            content_type=req.content_type,
+            expires_in=req.expires_in
+        )
+    except Exception as e:
+        logger.error(f"[api_server] Error in post_presigned_upload: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate presigned upload URL: {str(e)}")
 
 
 @app.put("/api/storage/upload")
 async def local_storage_upload(request: Request, key: str = Query(...)):
-    """Direct streaming upload destination for local development."""
-    safe_key = os.path.basename(key)
-    dest_path = os.path.join(STORAGE_DIR, safe_key)
-    body = await request.body()
-    with open(dest_path, "wb") as f:
-        f.write(body)
-    return {"success": True, "file_key": safe_key, "url": f"/api/storage/download?key={safe_key}"}
+    """
+    Direct streaming upload destination for local development / fallback.
+    Receives raw binary payload directly matching S3 presigned PUT behavior.
+    """
+    try:
+        safe_key = Path(key).name
+        dest_path = LOCAL_STORAGE_DIR / safe_key
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="Empty upload payload")
+        with open(dest_path, "wb") as f:
+            f.write(body)
+        return {
+            "success": True,
+            "file_key": safe_key,
+            "url": f"/api/storage/download?key={safe_key}",
+            "bytes_received": len(body)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[api_server] Local storage upload failed for {key}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Local storage write failed: {str(e)}")
 
 
 @app.get("/api/storage/download")
 def local_storage_download(key: str = Query(...)):
     """Direct download route for local storage engine."""
-    safe_key = os.path.basename(key)
-    file_path = os.path.join(STORAGE_DIR, safe_key)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found in storage")
-    return FileResponse(file_path)
+    try:
+        safe_key = Path(key).name
+        file_path = LOCAL_STORAGE_DIR / safe_key
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail="File not found in storage")
+        return FileResponse(file_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[api_server] Local storage download error for {key}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Storage download failed: {str(e)}")
+
+
+@app.post("/api/storage/register-photo", response_model=RegisterPhotoResponse)
+async def register_photo_endpoint(
+    req: RegisterPhotoRequest,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """
+    Registers an image uploaded directly to Cloudflare R2 / storage fallback.
+    Reads binary from storage, validates constraints, computes AI portrait analytics,
+    and stages the item into the studio's active BATCH_STORE.
+    """
+    studio_id = current_user.get("studio_id") if current_user else "default_studio"
+    try:
+        # 1. Fetch raw binary from R2 / local storage
+        contents = storage.get_object_bytes(req.file_key)
+
+        # 2. Strict validation (size, MIME, pixel count) & OpenCV decode
+        img_bgr = validate_image_upload(contents, req.filename)
+
+        # 3. YuNet Face Detection & AI Portrait Analysis
+        photo_id = f"batch-{int(time.time()*1000)}-{uuid.uuid4().hex[:6]}"
+        analysis = analyze_portrait(img_bgr)
+
+        # 4. Stage into BATCH_STORE
+        BATCH_STORE[photo_id] = {
+            "id": photo_id,
+            "studio_id": studio_id,
+            "filename": req.filename,
+            "file_key": req.file_key,
+            "img_bgr": img_bgr,
+            "enhanced_bgr": img_bgr,
+            "face_info": None,
+            "analysis": analysis,
+            "status": "ready"
+        }
+
+        item_data = {
+            "id": photo_id,
+            "name": req.filename,
+            "previewUrl": f"/api/photos/{photo_id}/preview",
+            "masterUrl": f"/api/photos/{photo_id}/master",
+            "crop8rUrl": f"/api/photos/{photo_id}/crop-8r",
+            "crop2x2Url": f"/api/photos/{photo_id}/crop-2x2",
+            "originalUrl": image_to_base64_data_uri(img_bgr, quality=75),
+            "enhancedUrl": f"/api/photos/{photo_id}/master",
+            "analysis": analysis,
+            "status": "ready"
+        }
+
+        return RegisterPhotoResponse(success=True, item=item_data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[api_server] Error registering photo {req.filename} ({req.file_key}): {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to register photo: {str(e)}")
 
 
 # =========================================================================
@@ -675,11 +831,7 @@ async def process_single_image(
         cv2.circle(img_bgr, (300, 320), 140, (150, 180, 210), -1)
         filename = "Synthetic_Sample_Portrait.jpg"
 
-    analysis = analyze_portrait(img_bgr)
-    
-    # Process through unified pipeline
-    enhanced_bgr, latency_ms, face_info, engine_label = process_complete_workflow(
-        img_bgr,
+    params = ProcessingParams(
         bg_replacement_enabled=bg_replacement_enabled,
         backdrop_type=backdrop_type,
         beauty_preset=beauty_preset,
@@ -696,12 +848,21 @@ async def process_single_image(
         lighting_temp=lighting_temp,
         studio_light_intensity=studio_light_intensity,
         rim_light_boost=rim_light_boost,
-        iron_strength=iron_strength,
-        analysis_data=analysis
+        iron_strength=iron_strength
     )
 
-    crop_8r = crop_8r_aspect(enhanced_bgr)
-    crop_2x2 = crop_2x2_id(enhanced_bgr, face_info)
+    # Process through standardized ML pipeline
+    pipe_res = process_image(img_bgr, parameters=params)
+    if not pipe_res.success:
+        raise HTTPException(status_code=500, detail=pipe_res.error or "Pipeline processing failed")
+
+    enhanced_bgr = pipe_res.enhanced_bgr
+    crop_8r = pipe_res.crop_8r_bgr
+    crop_2x2 = pipe_res.crop_2x2_bgr
+    face_info = pipe_res.face_info
+    latency_ms = pipe_res.latency_ms
+    engine_label = pipe_res.engine_used
+    analysis = pipe_res.analysis
 
     if not photo_id:
         photo_id = f"photo-{int(time.time()*1000)}"

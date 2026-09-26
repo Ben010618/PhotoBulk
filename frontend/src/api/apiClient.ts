@@ -18,8 +18,12 @@ import {
   JobStatusResponse,
   LoginResponse,
   PhotoItem,
+  PresignedDownloadResponse,
+  PresignedUploadResponse,
   ProcessedPhotoResponse,
   RegaliaProfile,
+  RegisterPhotoRequest,
+  RegisterPhotoResponse,
   SampleResponse,
   UserSession,
 } from '../types';
@@ -205,20 +209,127 @@ export const apiClient = {
   },
 
   /**
-   * Batch Operations
+   * Cloudflare R2 Direct Edge Storage & Upload Operations
    */
-  async batchUpload(files: File[]): Promise<BatchUploadResponse> {
+  async getPresignedUploadUrl(filename: string, contentType: string = 'image/jpeg'): Promise<PresignedUploadResponse> {
     try {
-      const formData = new FormData();
-      files.forEach((file) => formData.append('files', file));
-
-      const res = await axiosInstance.post<BatchUploadResponse>('/api/batch-upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+      const res = await axiosInstance.get<PresignedUploadResponse>('/api/storage/presigned-url', {
+        params: {
+          file_key: filename,
+          action: 'upload',
+          content_type: contentType,
+        },
       });
       return res.data;
     } catch (err: unknown) {
-      console.error('[apiClient.batchUpload] Batch upload failed:', err);
+      console.error('[apiClient.getPresignedUploadUrl] Failed to get presigned upload URL:', err);
       throw err;
+    }
+  },
+
+  async getPresignedDownloadUrl(fileKey: string): Promise<PresignedDownloadResponse> {
+    try {
+      const res = await axiosInstance.get<PresignedDownloadResponse>('/api/storage/presigned-url', {
+        params: {
+          file_key: fileKey,
+          action: 'download',
+        },
+      });
+      return res.data;
+    } catch (err: unknown) {
+      console.error('[apiClient.getPresignedDownloadUrl] Failed to get presigned download URL:', err);
+      throw err;
+    }
+  },
+
+  async registerUploadedPhoto(data: RegisterPhotoRequest): Promise<RegisterPhotoResponse> {
+    try {
+      const res = await axiosInstance.post<RegisterPhotoResponse>('/api/storage/register-photo', data);
+      return res.data;
+    } catch (err: unknown) {
+      console.error('[apiClient.registerUploadedPhoto] Failed to register uploaded photo:', err);
+      throw err;
+    }
+  },
+
+  async uploadDirectToStorage(file: File, onProgress?: (pct: number) => void): Promise<PhotoItem> {
+    try {
+      const presigned = await this.getPresignedUploadUrl(file.name, file.type || 'image/jpeg');
+
+      // Direct PUT of binary payload to Cloudflare R2 or local fallback endpoint
+      await axios.put(presigned.upload_url, file, {
+        headers: {
+          'Content-Type': file.type || 'image/jpeg',
+        },
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total && onProgress) {
+            const pct = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            onProgress(pct);
+          }
+        },
+      });
+
+      const registerResult = await this.registerUploadedPhoto({
+        file_key: presigned.file_key,
+        filename: file.name,
+      });
+
+      return registerResult.item;
+    } catch (err: unknown) {
+      console.error(`[apiClient.uploadDirectToStorage] Direct edge upload failed for ${file.name}:`, err);
+      throw err;
+    }
+  },
+
+  async batchUploadDirect(
+    files: File[],
+    onProgress?: (completed: number, total: number) => void
+  ): Promise<BatchUploadResponse> {
+    try {
+      let completed = 0;
+      const total = files.length;
+      const items: PhotoItem[] = [];
+
+      for (const file of files) {
+        const item = await this.uploadDirectToStorage(file);
+        items.push(item);
+        completed += 1;
+        if (onProgress) {
+          onProgress(completed, total);
+        }
+      }
+
+      return {
+        uploaded_count: items.length,
+        items,
+      };
+    } catch (err: unknown) {
+      console.error('[apiClient.batchUploadDirect] Direct batch upload error:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Batch Operations (with direct edge upload and standard multipart fallback)
+   */
+  async batchUpload(files: File[]): Promise<BatchUploadResponse> {
+    try {
+      // First attempt zero-egress, non-blocking direct edge upload
+      return await this.batchUploadDirect(files);
+    } catch (edgeErr: unknown) {
+      console.warn('[apiClient.batchUpload] Direct edge upload encountered error, falling back to standard multipart batch upload:', edgeErr);
+      try {
+        const formData = new FormData();
+        files.forEach((file) => formData.append('files', file));
+
+        const res = await axiosInstance.post<BatchUploadResponse>('/api/batch-upload', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        return res.data;
+      } catch (err: unknown) {
+        console.error('[apiClient.batchUpload] Standard batch upload fallback also failed:', err);
+        throw err;
+      }
     }
   },
 

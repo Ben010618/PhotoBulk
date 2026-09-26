@@ -174,3 +174,28 @@ export interface AiKeyTestResponse {
   detail?: string;
 }
 
+export interface PresignedUploadResponse {
+  upload_url: string;
+  file_key: string;
+  storage: string;
+  expires_in: number;
+  content_type: string;
+}
+
+export interface PresignedDownloadResponse {
+  download_url: string;
+  file_key: string;
+  storage: string;
+  expires_in: number;
+}
+
+export interface RegisterPhotoRequest {
+  file_key: string;
+  filename: string;
+}
+
+export interface RegisterPhotoResponse {
+  success: boolean;
+  item: PhotoItem;
+}
+

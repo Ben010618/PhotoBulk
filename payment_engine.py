@@ -18,6 +18,7 @@ import requests
 from typing import Optional, Dict, Any
 
 from init_db import get_db_connection
+from webhook_verifier import webhook_verifier, PayMongoSignatureVerifier, PayMongoWebhookResult
 
 
 class PayMongoEngine:
@@ -143,29 +144,14 @@ class PayMongoEngine:
         Validates HMAC SHA256 signature from PayMongo webhooks to prevent spoofing.
         Header format: t=timestamp,te=test_signature,li=live_signature
         """
-        if not signature_header:
-            return False
-            
         secret = self.webhook_secret or os.environ.get("PAYMONGO_WEBHOOK_SECRET", "")
-        if not secret:
-            return False
-            
-        try:
-            parts = dict(x.split("=", 1) for x in signature_header.split(",") if "=" in x)
-            timestamp = parts.get("t", "")
-            signature = parts.get("li") or parts.get("te")
-            if not signature or not timestamp:
-                return False
-                
-            signed_payload = f"{timestamp}.{raw_body.decode('utf-8')}"
-            expected_sig = hmac.new(
-                secret.encode('utf-8'),
-                signed_payload.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
-            return hmac.compare_digest(expected_sig, signature)
-        except Exception:
-            return False
+        is_valid, _ = webhook_verifier.verify_signature(
+            raw_body=raw_body,
+            signature_header=signature_header,
+            secret=secret,
+            enforce_tolerance=False
+        )
+        return is_valid
 
     def handle_webhook_event(self, event_data: dict) -> Dict[str, Any]:
         """

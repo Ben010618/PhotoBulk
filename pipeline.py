@@ -7,15 +7,67 @@ into a single high-performance pipeline used by both local and cloud fleet runti
 
 import os
 import time
+import logging
+import traceback
+from pathlib import Path
+from typing import Dict, Any, Tuple, Optional, List, Union
 import cv2
 import numpy as np
 from PIL import Image
-from typing import Dict, Any, Tuple, Optional, List
+from pydantic import BaseModel, Field
 
-from analyzer_engine import analyze_portrait, get_face_detector
+from analyzer_engine import analyze_portrait, get_face_detector, load_portrait_image_safely
 from beautification_presets import apply_beauty_preset_to_image, BEAUTY_PRESETS
 from background_engine import generate_studio_backdrop, composite_subject_onto_backdrop, STUDIO_BACKDROPS
 from regalia_profiles import REGALIA_PROFILES
+from watermark_engine import generate_watermarked_proof
+
+logger = logging.getLogger("kameraph.pipeline")
+
+
+class ProcessingParams(BaseModel):
+    bg_replacement_enabled: bool = True
+    backdrop_type: str = "royal_navy"
+    beauty_preset: str = "morena_radiant"
+    regalia_profile: str = "standard_toga"
+    skin_smoothing: float = Field(default=0.65, ge=0.0, le=1.0)
+    blemish_cut: float = Field(default=0.75, ge=0.0, le=1.0)
+    dark_spot_whitening: float = Field(default=0.50, ge=0.0, le=1.0)
+    shine_reduction: float = Field(default=0.35, ge=0.0, le=1.0)
+    lip_color: str = "#d87093"
+    lip_intensity: float = Field(default=0.35, ge=0.0, le=1.0)
+    glow_intensity: float = Field(default=0.40, ge=0.0, le=1.0)
+    eye_catchlight: float = Field(default=0.35, ge=0.0, le=1.0)
+    teeth_whitening: float = Field(default=0.50, ge=0.0, le=1.0)
+    lighting_temp: str = "neutral_5500k"
+    studio_light_intensity: float = Field(default=0.20, ge=0.0, le=1.0)
+    rim_light_boost: float = Field(default=0.20, ge=0.0, le=1.0)
+    iron_strength: float = Field(default=0.70, ge=0.0, le=1.0)
+    output_directory: Optional[str] = None
+    save_crops: bool = True
+    save_proof: bool = False
+    student_name: str = "Juan Dela Cruz"
+    student_id: Optional[str] = None
+
+
+class ProcessedImageResult(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
+    success: bool
+    latency_ms: int = 0
+    engine_used: str = "Local CPU (OpenCV + ONNX Hybrid)"
+    enhanced_image_path: Optional[str] = None
+    crop_8r_path: Optional[str] = None
+    crop_2x2_path: Optional[str] = None
+    proof_path: Optional[str] = None
+    analysis: Dict[str, Any] = Field(default_factory=dict)
+    face_info: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    enhanced_bgr: Optional[np.ndarray] = Field(default=None, exclude=True)
+    crop_8r_bgr: Optional[np.ndarray] = Field(default=None, exclude=True)
+    crop_2x2_bgr: Optional[np.ndarray] = Field(default=None, exclude=True)
+    proof_bgr: Optional[np.ndarray] = Field(default=None, exclude=True)
+
 
 _REMBG_SESSION = None
 
@@ -259,3 +311,129 @@ def process_complete_workflow(
     engine_label = detect_actual_engine()
 
     return enhanced_portrait, actual_latency_ms, face_info, engine_label
+
+
+def process_image(
+    image_input: Union[str, Path, np.ndarray],
+    parameters: Optional[ProcessingParams] = None
+) -> ProcessedImageResult:
+    """
+    Standardized, type-hinted entry point for the KameraPh ML Vision Pipeline.
+    Supports file paths (str/Path) and in-memory arrays (np.ndarray).
+    Returns structured ProcessedImageResult with metadata, crops, and optional disk artifacts.
+    """
+    start_time = time.time()
+    params = parameters or ProcessingParams()
+    engine_label = detect_actual_engine()
+
+    try:
+        # 1. Safe Image Resolution
+        img_bgr = load_portrait_image_safely(image_input)
+    except FileNotFoundError as e:
+        logger.error(f"[pipeline] Input image file not found: {image_input}")
+        return ProcessedImageResult(
+            success=False,
+            latency_ms=0,
+            engine_used=engine_label,
+            error=f"Image file not found: {image_input}"
+        )
+    except Exception as e:
+        logger.error(f"[pipeline] Failed to load image {image_input}: {e}\n{traceback.format_exc()}")
+        return ProcessedImageResult(
+            success=False,
+            latency_ms=0,
+            engine_used=engine_label,
+            error=f"Image decode failure: {str(e)}"
+        )
+
+    try:
+        # 2. Run Complete Workflow
+        enhanced_bgr, workflow_latency_ms, face_info, engine_label = process_complete_workflow(
+            img_bgr,
+            bg_replacement_enabled=params.bg_replacement_enabled,
+            backdrop_type=params.backdrop_type,
+            beauty_preset=params.beauty_preset,
+            regalia_profile=params.regalia_profile,
+            skin_smoothing=params.skin_smoothing,
+            blemish_cut=params.blemish_cut,
+            dark_spot_whitening=params.dark_spot_whitening,
+            shine_reduction=params.shine_reduction,
+            lip_color=params.lip_color,
+            lip_intensity=params.lip_intensity,
+            glow_intensity=params.glow_intensity,
+            eye_catchlight=params.eye_catchlight,
+            teeth_whitening=params.teeth_whitening,
+            lighting_temp=params.lighting_temp,
+            studio_light_intensity=params.studio_light_intensity,
+            rim_light_boost=params.rim_light_boost,
+            iron_strength=params.iron_strength
+        )
+
+        # 3. Compute High-Precision Standard Prints
+        crop_8r = crop_8r_aspect(enhanced_bgr)
+        crop_2x2 = crop_2x2_id(enhanced_bgr, face_info)
+        proof_bgr = None
+
+        if params.save_proof:
+            proof_bgr = generate_watermarked_proof(
+                enhanced_bgr,
+                student_name=params.student_name,
+                student_id=params.student_id or "STUDIO_PROOF"
+            )
+
+        # 4. Optional Safe Disk Export
+        enhanced_path = None
+        crop_8r_path = None
+        crop_2x2_path = None
+        proof_path = None
+
+        if params.output_directory:
+            out_dir = Path(params.output_directory)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            base_name = Path(image_input).stem if isinstance(image_input, (str, Path)) else "processed_portrait"
+
+            p_enhanced = out_dir / f"{base_name}_enhanced.jpg"
+            cv2.imwrite(str(p_enhanced), enhanced_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            enhanced_path = str(p_enhanced)
+
+            if params.save_crops:
+                p_8r = out_dir / f"{base_name}_8R.jpg"
+                cv2.imwrite(str(p_8r), crop_8r, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                crop_8r_path = str(p_8r)
+
+                p_2x2 = out_dir / f"{base_name}_2x2.jpg"
+                cv2.imwrite(str(p_2x2), crop_2x2, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                crop_2x2_path = str(p_2x2)
+
+            if params.save_proof and proof_bgr is not None:
+                p_proof = out_dir / f"{base_name}_proof.jpg"
+                cv2.imwrite(str(p_proof), proof_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                proof_path = str(p_proof)
+
+        total_latency_ms = max(1, int((time.time() - start_time) * 1000))
+        analysis = analyze_portrait(enhanced_bgr)
+
+        return ProcessedImageResult(
+            success=True,
+            latency_ms=total_latency_ms,
+            engine_used=engine_label,
+            enhanced_image_path=enhanced_path,
+            crop_8r_path=crop_8r_path,
+            crop_2x2_path=crop_2x2_path,
+            proof_path=proof_path,
+            analysis=analysis,
+            face_info=face_info,
+            enhanced_bgr=enhanced_bgr,
+            crop_8r_bgr=crop_8r,
+            crop_2x2_bgr=crop_2x2,
+            proof_bgr=proof_bgr
+        )
+    except Exception as e:
+        logger.error(f"[pipeline] Execution error during processing: {e}\n{traceback.format_exc()}")
+        return ProcessedImageResult(
+            success=False,
+            latency_ms=int((time.time() - start_time) * 1000),
+            engine_used=engine_label,
+            error=f"Processing failure: {str(e)}"
+        )

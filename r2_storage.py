@@ -6,13 +6,45 @@ Enables:
   1. Direct presigned multipart uploads from client browsers (bypassing app servers).
   2. Presigned temporary download links for student photo packages.
   3. ZERO data-transfer / egress charges on downloads.
+
+Security & Reliability Directives:
+  - Zero Silent Failures: boto3 calls wrapped in try/except with full stack logging.
+  - Strict Type Safety: Pydantic models for request/response payloads.
+  - Path Isolation: Uses pathlib.Path for local fallback directory.
 """
 
 import os
+import io
+import logging
+import traceback
+from pathlib import Path
+from typing import Dict, Any, Optional
+
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
-from typing import Dict, Any, Optional
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger("kameraph.r2_storage")
+
+BASE_DIR = Path(__file__).resolve().parent
+LOCAL_STORAGE_DIR = Path(os.getenv("LOCAL_STORAGE_DIR", BASE_DIR / "local_storage"))
+LOCAL_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class PresignedUploadResult(BaseModel):
+    upload_url: str
+    file_key: str
+    storage: str
+    expires_in: int
+    content_type: str = "image/jpeg"
+
+
+class PresignedDownloadResult(BaseModel):
+    download_url: str
+    file_key: str
+    storage: str
+    expires_in: int
 
 
 class R2StorageEngine:
@@ -31,66 +63,134 @@ class R2StorageEngine:
         )
 
         if self.is_configured:
-            endpoint = f"https://{self.account_id}.r2.cloudflarestorage.com"
-            self.s3_client = boto3.client(
-                "s3",
-                endpoint_url=endpoint,
-                aws_access_key_id=self.access_key,
-                aws_secret_access_key=self.secret_key,
-                config=Config(signature_version="s3v4")
-            )
+            try:
+                endpoint = f"https://{self.account_id}.r2.cloudflarestorage.com"
+                self.s3_client = boto3.client(
+                    "s3",
+                    endpoint_url=endpoint,
+                    aws_access_key_id=self.access_key,
+                    aws_secret_access_key=self.secret_key,
+                    config=Config(signature_version="s3v4")
+                )
+                logger.info(f"[r2_storage] Cloudflare R2 client initialized for bucket '{self.bucket_name}'")
+            except Exception as e:
+                logger.error(f"[r2_storage] Failed to initialize R2 S3 client: {e}\n{traceback.format_exc()}")
+                self.s3_client = None
+                self.is_configured = False
         else:
             self.s3_client = None
+            logger.info("[r2_storage] R2 credentials not configured. Local streaming fallback active.")
 
-    def generate_presigned_upload_url(self, file_key: str, content_type: str = "image/jpeg", expires_in: int = 3600) -> Dict[str, Any]:
+    def generate_presigned_upload_url(
+        self,
+        file_key: str,
+        content_type: str = "image/jpeg",
+        expires_in: int = 3600
+    ) -> PresignedUploadResult:
         """
         Generates a direct pre-signed PUT URL for browser uploads to Cloudflare R2.
         Bypasses web server memory during high-volume pictorial spikes.
         """
-        if not self.is_configured:
+        safe_key = Path(file_key).name
+
+        if not self.is_configured or self.s3_client is None:
             # Fallback for local development
-            return {
-                "upload_url": f"/api/storage/upload?key={file_key}",
-                "file_key": file_key,
-                "storage": "local_streaming",
-                "expires_in": expires_in
-            }
+            return PresignedUploadResult(
+                upload_url=f"/api/storage/upload?key={safe_key}",
+                file_key=safe_key,
+                storage="local_streaming",
+                expires_in=expires_in,
+                content_type=content_type
+            )
 
         try:
             url = self.s3_client.generate_presigned_url(
                 "put_object",
                 Params={
                     "Bucket": self.bucket_name,
-                    "Key": file_key,
+                    "Key": safe_key,
                     "ContentType": content_type
                 },
                 ExpiresIn=expires_in
             )
-            return {
-                "upload_url": url,
-                "file_key": file_key,
-                "storage": "cloudflare_r2",
-                "expires_in": expires_in
-            }
+            return PresignedUploadResult(
+                upload_url=url,
+                file_key=safe_key,
+                storage="cloudflare_r2",
+                expires_in=expires_in,
+                content_type=content_type
+            )
         except ClientError as e:
-            return {"error": str(e), "storage": "error"}
+            logger.error(f"[r2_storage] ClientError generating presigned PUT URL for {safe_key}: {e}\n{traceback.format_exc()}")
+            # Graceful fallback to local streaming
+            return PresignedUploadResult(
+                upload_url=f"/api/storage/upload?key={safe_key}",
+                file_key=safe_key,
+                storage="local_fallback",
+                expires_in=expires_in,
+                content_type=content_type
+            )
 
-    def generate_presigned_download_url(self, file_key: str, expires_in: int = 86400) -> str:
+    def generate_presigned_download_url(
+        self,
+        file_key: str,
+        expires_in: int = 86400
+    ) -> PresignedDownloadResult:
         """
         Generates a temporary pre-signed GET URL for clients to stream high-res photos
         directly from Cloudflare R2 with zero egress transfer cost.
         """
-        if not self.is_configured:
-            return f"/api/storage/download?key={file_key}"
+        safe_key = Path(file_key).name
+
+        if not self.is_configured or self.s3_client is None:
+            return PresignedDownloadResult(
+                download_url=f"/api/storage/download?key={safe_key}",
+                file_key=safe_key,
+                storage="local_streaming",
+                expires_in=expires_in
+            )
 
         try:
-            return self.s3_client.generate_presigned_url(
+            url = self.s3_client.generate_presigned_url(
                 "get_object",
-                Params={"Bucket": self.bucket_name, "Key": file_key},
+                Params={"Bucket": self.bucket_name, "Key": safe_key},
                 ExpiresIn=expires_in
             )
-        except ClientError:
-            return f"/api/storage/download?key={file_key}"
+            return PresignedDownloadResult(
+                download_url=url,
+                file_key=safe_key,
+                storage="cloudflare_r2",
+                expires_in=expires_in
+            )
+        except ClientError as e:
+            logger.error(f"[r2_storage] ClientError generating presigned GET URL for {safe_key}: {e}\n{traceback.format_exc()}")
+            return PresignedDownloadResult(
+                download_url=f"/api/storage/download?key={safe_key}",
+                file_key=safe_key,
+                storage="local_fallback",
+                expires_in=expires_in
+            )
+
+    def get_object_bytes(self, file_key: str) -> bytes:
+        """
+        Retrieves raw object bytes from Cloudflare R2 or local storage fallback.
+        """
+        safe_key = Path(file_key).name
+
+        if self.is_configured and self.s3_client is not None:
+            try:
+                response = self.s3_client.get_object(Bucket=self.bucket_name, Key=safe_key)
+                return response["Body"].read()
+            except ClientError as e:
+                logger.error(f"[r2_storage] Failed to fetch {safe_key} from R2 bucket: {e}\n{traceback.format_exc()}")
+
+        # Local storage fallback
+        local_path = LOCAL_STORAGE_DIR / safe_key
+        if not local_path.is_file():
+            raise FileNotFoundError(f"[r2_storage] File {safe_key} not found in local or R2 storage.")
+
+        with open(local_path, "rb") as f:
+            return f.read()
 
 
 storage = R2StorageEngine()

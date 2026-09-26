@@ -348,7 +348,197 @@ class TestKameraPhSuite(unittest.TestCase):
             self.assertTrue(nested_contact.is_file())
             self.assertGreater(len(contact_bytes), 1000)
 
+    def test_14_presigned_r2_upload_and_registration(self):
+        """Task 2A: Verifies Cloudflare R2 presigned upload/download and direct edge registration flow."""
+        # 1. Request presigned upload URL via GET
+        res_get_url = self.client.get("/api/storage/presigned-url?file_key=direct_edge_test.jpg&action=upload")
+        self.assertEqual(res_get_url.status_code, 200)
+        data_get = res_get_url.json()
+        self.assertIn("upload_url", data_get)
+        self.assertIn("file_key", data_get)
+        self.assertEqual(data_get["file_key"], "direct_edge_test.jpg")
+
+        # 2. Request presigned upload URL via typed POST
+        res_post_url = self.client.post("/api/storage/presigned-upload", json={"filename": "Cohort_2026_Grad.jpg"})
+        self.assertEqual(res_post_url.status_code, 200)
+        data_post = res_post_url.json()
+        self.assertIn("upload_url", data_post)
+        self.assertIn("Cohort_2026_Grad.jpg", data_post["file_key"])
+        target_file_key = data_post["file_key"]
+        upload_endpoint = data_post["upload_url"]
+
+        # 3. Simulate browser direct PUT upload
+        _, test_jpg_bytes = cv2.imencode(".jpg", self.test_img)
+        res_put = self.client.put(upload_endpoint, content=test_jpg_bytes.tobytes(), headers={"Content-Type": "image/jpeg"})
+        self.assertEqual(res_put.status_code, 200)
+        put_data = res_put.json()
+        self.assertTrue(put_data["success"])
+        self.assertEqual(put_data["file_key"], target_file_key)
+
+        # 4. Register photo with backend
+        res_reg = self.client.post("/api/storage/register-photo", json={
+            "file_key": target_file_key,
+            "filename": "Cohort_2026_Grad.jpg"
+        })
+        self.assertEqual(res_reg.status_code, 200)
+        reg_data = res_reg.json()
+        self.assertTrue(reg_data["success"])
+        item = reg_data["item"]
+        self.assertIn("id", item)
+        self.assertEqual(item["name"], "Cohort_2026_Grad.jpg")
+        self.assertEqual(item["status"], "ready")
+        self.assertIn("previewUrl", item)
+        self.assertIn("masterUrl", item)
+
+        # Verify photo exists in BATCH_STORE and can be previewed
+        photo_id = item["id"]
+        self.assertIn(photo_id, BATCH_STORE)
+        res_preview = self.client.get(f"/api/photos/{photo_id}/preview")
+        self.assertEqual(res_preview.status_code, 200)
+        self.assertEqual(res_preview.headers["content-type"], "image/jpeg")
+
+        # 5. Request presigned download URL
+        res_down = self.client.get(f"/api/storage/presigned-url?file_key={target_file_key}&action=download")
+        self.assertEqual(res_down.status_code, 200)
+        down_data = res_down.json()
+        self.assertIn("download_url", down_data)
+
+    def test_15_cryptographic_webhook_verification(self):
+        """Task 2B: Verifies PayMongo HMAC-SHA256 signature middleware, replay protection, and idempotency."""
+        from webhook_verifier import webhook_verifier
+        import json
+        import time
+
+        test_secret = "whsec_test_kamera_secret_2026"
+        webhook_verifier.webhook_secret = test_secret
+
+        # 1. Create a pending checkout session in DB
+        checkout = payment_engine.create_checkout_session(
+            package_id="volume_2500",
+            studio_id="studio-test",
+            studio_email="billing@auragrad-studio.ph",
+            studio_name="AuraGrad Studio"
+        )
+        session_id = checkout["session_id"]
+
+        valid_payload_dict = {
+            "type": "checkout_session.payment.paid",
+            "session_id": session_id,
+            "data": {
+                "attributes": {
+                    "type": "checkout_session.payment.paid",
+                    "data": {
+                        "attributes": {
+                            "payment_method_used": "gcash",
+                            "amount": 750000
+                        }
+                    }
+                }
+            }
+        }
+        valid_raw_bytes = json.dumps(valid_payload_dict).encode("utf-8")
+
+        # 2. Reject request with missing signature header
+        res_missing = self.client.post("/api/payments/webhook", content=valid_raw_bytes)
+        self.assertEqual(res_missing.status_code, 401)
+        self.assertIn("Missing Paymongo-Signature", res_missing.json()["detail"])
+
+        # 3. Reject request with invalid signature
+        fake_header = f"t={int(time.time())},te=deadbeef1234567890abcdefdeadbeef1234567890abcdefdeadbeef1234567890"
+        res_invalid = self.client.post("/api/payments/webhook", content=valid_raw_bytes, headers={"Paymongo-Signature": fake_header})
+        self.assertEqual(res_invalid.status_code, 401)
+        self.assertIn("Signature mismatch", res_invalid.json()["detail"])
+
+        # 4. Reject replay attack (timestamp older than 300 seconds)
+        expired_ts = int(time.time()) - 400
+        expired_header = webhook_verifier.generate_header(valid_raw_bytes, timestamp=expired_ts, secret=test_secret)
+        res_expired = self.client.post("/api/payments/webhook", content=valid_raw_bytes, headers={"Paymongo-Signature": expired_header})
+        self.assertEqual(res_expired.status_code, 401)
+        self.assertIn("tolerance", res_expired.json()["detail"])
+
+        # 5. Accept cryptographically valid signature with fresh timestamp
+        valid_header = webhook_verifier.generate_header(valid_raw_bytes, secret=test_secret)
+        res_valid = self.client.post("/api/payments/webhook", content=valid_raw_bytes, headers={"Paymongo-Signature": valid_header})
+        self.assertEqual(res_valid.status_code, 200)
+        valid_data = res_valid.json()
+        self.assertTrue(valid_data["success"])
+        self.assertEqual(valid_data["credits_added"], 2500)
+        self.assertEqual(valid_data["session_id"], session_id)
+
+        # 6. Idempotency: replay the same event, must not add credits again
+        fresh_header_replay = webhook_verifier.generate_header(valid_raw_bytes, secret=test_secret)
+        res_replay = self.client.post("/api/payments/webhook", content=valid_raw_bytes, headers={"Paymongo-Signature": fresh_header_replay})
+        self.assertEqual(res_replay.status_code, 200)
+        replay_data = res_replay.json()
+        self.assertTrue(replay_data["success"])
+        self.assertEqual(replay_data["credits_added"], 0)
+        self.assertIn("already processed", replay_data["message"])
+
+        # 7. Malformed JSON payload rejection (400)
+        malformed_bytes = b"not-a-valid-json-payload{"
+        malformed_header = webhook_verifier.generate_header(malformed_bytes, secret=test_secret)
+        res_malformed = self.client.post("/api/payments/webhook", content=malformed_bytes, headers={"Paymongo-Signature": malformed_header})
+        self.assertEqual(res_malformed.status_code, 400)
+        self.assertIn("Malformed JSON", res_malformed.json()["detail"])
+
+        # Reset secret for subsequent tests
+        webhook_verifier.webhook_secret = ""
+
+    def test_16_standardized_ml_pipeline(self):
+        """Task 2C: Verifies standardized process_image entry point, Pydantic typing, and safe export."""
+        from kamera_pipeline_v3 import process_image, ProcessingParams, ProcessedImageResult
+        from pathlib import Path
+        import tempfile
+
+        # 1. Test in-memory numpy array execution
+        result_mem = process_image(self.test_img)
+        self.assertIsInstance(result_mem, ProcessedImageResult)
+        self.assertTrue(result_mem.success)
+        self.assertIsNotNone(result_mem.enhanced_bgr)
+        self.assertIsNotNone(result_mem.crop_8r_bgr)
+        self.assertIsNotNone(result_mem.crop_2x2_bgr)
+        self.assertGreater(result_mem.latency_ms, 0)
+        self.assertIn("Hybrid", result_mem.engine_used)
+
+        # 2. Test file path input with custom ProcessingParams and disk exports
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_file = temp_path / "student_sample.jpg"
+            cv2.imwrite(str(input_file), self.test_img)
+
+            export_dir = temp_path / "cohort_out" / "section_a"
+            params = ProcessingParams(
+                bg_replacement_enabled=True,
+                backdrop_type="royal_navy",
+                beauty_preset="morena_radiant",
+                regalia_profile="up_sablay",
+                output_directory=str(export_dir),
+                save_crops=True,
+                save_proof=True,
+                student_name="Maria Clara"
+            )
+
+            result_file = process_image(input_file, parameters=params)
+            self.assertTrue(result_file.success)
+            self.assertIsNotNone(result_file.enhanced_image_path)
+            self.assertTrue(Path(result_file.enhanced_image_path).is_file())
+            self.assertIsNotNone(result_file.crop_8r_path)
+            self.assertTrue(Path(result_file.crop_8r_path).is_file())
+            self.assertIsNotNone(result_file.crop_2x2_path)
+            self.assertTrue(Path(result_file.crop_2x2_path).is_file())
+            self.assertIsNotNone(result_file.proof_path)
+            self.assertTrue(Path(result_file.proof_path).is_file())
+
+            # 3. Test non-existent file path: Zero Silent Failures graceful error
+            missing_input = temp_path / "does_not_exist.jpg"
+            result_missing = process_image(missing_input)
+            self.assertFalse(result_missing.success)
+            self.assertIn("not found", result_missing.error.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
 
