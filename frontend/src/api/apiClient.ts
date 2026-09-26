@@ -82,8 +82,8 @@ axiosInstance.interceptors.response.use(
         console.error('[API Client] Failed to handle 401 state transition:', storeErr);
       }
     }
-    // Global 402 Payment Required: Studio credits exhausted
-    else if (status === 402) {
+    // Global 402 Payment Required: Studio credits exhausted (only when payments enabled)
+    else if (status === 402 && useUIStore.getState().paymentsEnabled) {
       try {
         useUIStore.getState().openTopUpModal();
         useUIStore.getState().addToast('error', 'Studio credits depleted. Please top up your balance to continue.');
@@ -194,11 +194,13 @@ export const apiClient = {
       const formData = new FormData();
       Object.entries(options).forEach(([k, v]) => {
         if (v !== undefined && v !== null) {
-          formData.append(k, String(v));
+          // Map frontend catchlight_boost to backend eye_catchlight
+          const key = k === 'catchlight_boost' ? 'eye_catchlight' : k;
+          formData.append(key, String(v));
         }
       });
 
-      const res = await axiosInstance.post<ProcessedPhotoResponse>('/api/process', formData, {
+      const res = await axiosInstance.post<ProcessedPhotoResponse>('/api/process-image', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       return res.data;

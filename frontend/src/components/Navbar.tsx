@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 
 import { PageView, UserSession } from '../types';
+import { useUIStore } from '../store/useUIStore';
 export type { PageView, UserSession };
 
 interface NavbarProps {
@@ -31,6 +32,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onLogout,
   onOpenTopUp,
 }) => {
+  const paymentsEnabled = useUIStore((s) => s.paymentsEnabled);
   return (
     <header className="h-14 border-b border-[#30363d] bg-[#161b22] px-4 flex items-center justify-between z-30 shrink-0 select-none">
       {/* Brand & Main Nav */}
@@ -128,15 +130,17 @@ export const Navbar: React.FC<NavbarProps> = ({
         {currentUser ? (
           <>
             {/* Studio Credits Badge */}
-            <div
-              onClick={onOpenTopUp}
-              className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded bg-[#0d1117] border border-[#30363d] cursor-pointer hover:border-[#8b949e] transition text-xs font-mono"
-              title="Click to manage studio credits"
-            >
-              <Zap className="w-3.5 h-3.5 text-[#f0f6fc]" />
-              <span className="text-[#8b949e]">Credits:</span>
-              <span className="text-[#f0f6fc] font-semibold">{currentUser.credits}</span>
-            </div>
+            {paymentsEnabled && (
+              <div
+                onClick={onOpenTopUp}
+                className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded bg-[#0d1117] border border-[#30363d] cursor-pointer hover:border-[#8b949e] transition text-xs font-mono"
+                title="Click to manage studio credits"
+              >
+                <Zap className="w-3.5 h-3.5 text-[#f0f6fc]" />
+                <span className="text-[#8b949e]">Credits:</span>
+                <span className="text-[#f0f6fc] font-semibold">{currentUser.credits}</span>
+              </div>
+            )}
 
             {/* User Profile Badge */}
             <div className="flex items-center gap-2 pl-2 border-l border-[#30363d]">

@@ -237,8 +237,11 @@ class TestKameraPhSuite(unittest.TestCase):
         conn.commit()
         initial_balance = 150
 
+        import api_server
+        original_pe = api_server.PAYMENTS_ENABLED
         try:
-            # Deduct 1 credit
+            # When PAYMENTS_ENABLED is True, test deduction and 402 blocking
+            api_server.PAYMENTS_ENABLED = True
             success = deduct_studio_credit(studio_id, count=1)
             self.assertTrue(success)
             
@@ -251,8 +254,17 @@ class TestKameraPhSuite(unittest.TestCase):
             conn.commit()
 
             res = self.client.post("/api/process-image", data={"regalia_profile": "standard_toga"})
-            self.assertEqual(res.status_code, 402, "Must return 402 Payment Required when credit balance is zero!")
+            self.assertEqual(res.status_code, 402, "Must return 402 Payment Required when credit balance is zero and payments enabled!")
+
+            # When PAYMENTS_ENABLED is False (Step 0 feature flag), verify bypass (no 402, no deduction)
+            api_server.PAYMENTS_ENABLED = False
+            bypassed = deduct_studio_credit(studio_id, count=1)
+            self.assertTrue(bypassed)
+            # Balance should remain 0, no deduction occurred
+            cursor.execute("SELECT credit_balance FROM studios WHERE id = ?;", (studio_id,))
+            self.assertEqual(cursor.fetchone()["credit_balance"], 0)
         finally:
+            api_server.PAYMENTS_ENABLED = original_pe
             # Restore credits reliably
             cursor.execute("UPDATE studios SET credit_balance = 150 WHERE id = ?;", (studio_id,))
             conn.commit()

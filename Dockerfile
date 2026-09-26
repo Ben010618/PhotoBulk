@@ -11,7 +11,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # --- Stage 2: Python Production Server ---
-FROM python:3.11-slim AS production
+FROM python:3.12-slim AS production
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

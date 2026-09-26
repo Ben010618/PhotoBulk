@@ -11,13 +11,7 @@ interface AuthState {
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
-  currentUser: {
-    name: 'Juan Dela Cruz',
-    email: 'editor@auragrad-studio.ph',
-    role: 'photographer',
-    studioName: 'AuraGrad Creative Studio Manila',
-    credits: 150,
-  },
+  currentUser: null,
   token: localStorage.getItem('kameraph_token'),
 
   setCurrentUser: (user) => set({ currentUser: user }),

@@ -253,40 +253,20 @@ export default function App() {
     };
   }, [setCurrentUser, setCredits]);
 
-  // Initial Sample Fetch
+  // Synchronize System Config and Feature Flags
   useEffect(() => {
     let isMounted = true;
-    const loadInitialSample = async () => {
+    const fetchConfig = async () => {
       try {
-        const data = await api.getSample({
-          bg_replacement_enabled: bgReplacementEnabled,
-          backdrop_type: backdropType,
-          beauty_preset: beautyPreset,
-        });
-
-        if (isMounted && data) {
-          const sampleItem: PhotoItem = {
-            id: data.id,
-            name: data.filename,
-            originalUrl: data.original_data_uri,
-            enhancedUrl: data.enhanced_data_uri,
-            crop8rUrl: data.crop_8r_data_uri,
-            crop2x2Url: data.crop_2x2_data_uri,
-            status: 'done',
-            analysis: data.analysis,
-          };
-          setPhotos([sampleItem]);
-          setActivePhotoId(sampleItem.id);
-          if (data.studio_credits !== undefined) {
-            setCredits(data.studio_credits);
-          }
+        const res = await api.instance.get('/api/config');
+        if (isMounted && res.data) {
+          useUIStore.getState().setPaymentsEnabled(Boolean(res.data.payments_enabled));
         }
       } catch (err: unknown) {
-        console.warn('Could not load sample portrait:', err);
+        console.warn('[App] Could not fetch system config:', err);
       }
     };
-
-    loadInitialSample();
+    fetchConfig();
     return () => {
       isMounted = false;
     };
@@ -313,7 +293,7 @@ export default function App() {
         lip_color: lipColor,
         lip_intensity: lipIntensity / 100,
         glow_intensity: glowIntensity / 100,
-        catchlight_boost: catchlightBoost / 100,
+        eye_catchlight: catchlightBoost / 100,
         teeth_whitening: teethWhitening / 100,
         lighting_temp: lightingTemp,
         studio_light_intensity: studioLightIntensity / 100,
@@ -343,7 +323,7 @@ export default function App() {
       addToast('success', 'Neural retouching applied successfully.');
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Processing error occurred';
-      if (errorMsg.includes('402') || errorMsg.includes('Insufficient')) {
+      if (useUIStore.getState().paymentsEnabled && (errorMsg.includes('402') || errorMsg.includes('Insufficient'))) {
         openTopUpModal();
         addToast('error', 'Zero studio credits remaining. Please top up to continue.');
       } else {
@@ -374,7 +354,7 @@ export default function App() {
           lip_color: lipColor,
           lip_intensity: lipIntensity / 100,
           glow_intensity: glowIntensity / 100,
-          catchlight_boost: catchlightBoost / 100,
+          eye_catchlight: catchlightBoost / 100,
           teeth_whitening: teethWhitening / 100,
           lighting_temp: lightingTemp,
           studio_light_intensity: studioLightIntensity / 100,
@@ -416,7 +396,7 @@ export default function App() {
       addToast('success', `Batch complete! Processed ${photos.length} portraits.`);
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Batch processing error';
-      if (errorMsg.includes('402')) {
+      if (useUIStore.getState().paymentsEnabled && errorMsg.includes('402')) {
         openTopUpModal();
       }
       addToast('error', errorMsg);
@@ -713,14 +693,16 @@ export default function App() {
       )}
 
       {/* Top-Up Modal */}
-      <TopUpModal
-        isOpen={isTopUpModalOpen}
-        onClose={closeTopUpModal}
-        onSuccess={(addedCredits) => {
-          setCredits(currentUser ? currentUser.credits + addedCredits : addedCredits);
-          addToast('success', `Added ${addedCredits} credits to studio account.`);
-        }}
-      />
+      {useUIStore.getState().paymentsEnabled && (
+        <TopUpModal
+          isOpen={isTopUpModalOpen}
+          onClose={closeTopUpModal}
+          onSuccess={(addedCredits) => {
+            setCredits(currentUser ? currentUser.credits + addedCredits : addedCredits);
+            addToast('success', `Added ${addedCredits} credits to studio account.`);
+          }}
+        />
+      )}
     </div>
   );
 }

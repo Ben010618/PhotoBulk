@@ -18,6 +18,7 @@ import {
   CreditCard
 } from 'lucide-react';
 import { PageView, UserSession } from './Navbar';
+import { useUIStore } from '../store/useUIStore';
 
 interface UserDashboardProps {
   onNavigate: (page: PageView) => void;
@@ -41,6 +42,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
   currentUser,
   onOpenTopUp,
 }) => {
+  const paymentsEnabled = useUIStore((state) => state.paymentsEnabled);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'processing'>('all');
 
@@ -149,21 +151,36 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
           <div className="text-[11px] text-[#8b949e]">across 5 active cohorts</div>
         </div>
 
-        <div className="p-4 rounded-lg border border-[#30363d] bg-[#161b22] space-y-1">
-          <div className="flex items-center justify-between text-xs text-[#8b949e] font-mono">
-            <span>AVAILABLE CREDITS</span>
-            <Zap className="w-4 h-4 text-[#8b949e]" />
+        {paymentsEnabled ? (
+          <div className="p-4 rounded-lg border border-[#30363d] bg-[#161b22] space-y-1">
+            <div className="flex items-center justify-between text-xs text-[#8b949e] font-mono">
+              <span>AVAILABLE CREDITS</span>
+              <Zap className="w-4 h-4 text-[#8b949e]" />
+            </div>
+            <div className="text-2xl font-bold font-mono text-[#f0f6fc]">
+              {currentUser?.credits ?? 150}
+            </div>
+            <div className="text-[11px] text-[#8b949e] flex items-center justify-between">
+              <span>High-Res Master Units</span>
+              <button onClick={onOpenTopUp} className="text-[#f0f6fc] hover:underline font-mono text-[10px]">
+                + Top up
+              </button>
+            </div>
           </div>
-          <div className="text-2xl font-bold font-mono text-[#f0f6fc]">
-            {currentUser?.credits ?? 150}
+        ) : (
+          <div className="p-4 rounded-lg border border-[#30363d] bg-[#161b22] space-y-1">
+            <div className="flex items-center justify-between text-xs text-[#8b949e] font-mono">
+              <span>BATCH PIPELINE</span>
+              <Sparkles className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div className="text-2xl font-bold font-mono text-emerald-400">
+              UNLIMITED
+            </div>
+            <div className="text-[11px] text-[#8b949e]">
+              Local Studio Processing Active
+            </div>
           </div>
-          <div className="text-[11px] text-[#8b949e] flex items-center justify-between">
-            <span>High-Res Master Units</span>
-            <button onClick={onOpenTopUp} className="text-[#f0f6fc] hover:underline font-mono text-[10px]">
-              + Top up
-            </button>
-          </div>
-        </div>
+        )}
 
         <div className="p-4 rounded-lg border border-[#30363d] bg-[#161b22] space-y-1">
           <div className="flex items-center justify-between text-xs text-[#8b949e] font-mono">

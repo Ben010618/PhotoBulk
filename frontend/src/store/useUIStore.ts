@@ -4,17 +4,20 @@ import { PageView, ToastNotification } from '../types';
 interface UIState {
   currentPage: PageView;
   isTopUpModalOpen: boolean;
+  paymentsEnabled: boolean;
   toasts: ToastNotification[];
   setCurrentPage: (page: PageView) => void;
+  setPaymentsEnabled: (enabled: boolean) => void;
   openTopUpModal: () => void;
   closeTopUpModal: () => void;
   addToast: (type: 'success' | 'error' | 'info', message: string) => void;
   removeToast: (id: string) => void;
 }
 
-export const useUIStore = create<UIState>((set) => ({
+export const useUIStore = create<UIState>((set, get) => ({
   currentPage: (window.location.hash.replace('#', '') as PageView) || 'editor',
   isTopUpModalOpen: false,
+  paymentsEnabled: false,
   toasts: [],
 
   setCurrentPage: (page: PageView) => {
@@ -22,7 +25,13 @@ export const useUIStore = create<UIState>((set) => ({
     set({ currentPage: page });
   },
 
-  openTopUpModal: () => set({ isTopUpModalOpen: true }),
+  setPaymentsEnabled: (enabled: boolean) => set({ paymentsEnabled: enabled }),
+
+  openTopUpModal: () => {
+    if (get().paymentsEnabled) {
+      set({ isTopUpModalOpen: true });
+    }
+  },
   closeTopUpModal: () => set({ isTopUpModalOpen: false }),
 
   addToast: (type, message) => {

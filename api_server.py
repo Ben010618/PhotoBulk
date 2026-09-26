@@ -54,6 +54,7 @@ from init_db import (
     update_job_db,
     fetch_job_db
 )
+from config import PAYMENTS_ENABLED
 from auth import get_current_user, get_current_user_optional, require_admin, authenticate_user, create_access_token
 from r2_storage import (
     storage,
@@ -226,8 +227,12 @@ def get_studio_state(studio_id: Optional[str] = None) -> Dict[str, Any]:
 def deduct_studio_credit(studio_id: Optional[str] = None, count: int = 1) -> bool:
     """
     Checks and atomically deducts studio credit balance.
+    Bypassed when PAYMENTS_ENABLED is False (local demo mode).
     Returns True if successful, False if insufficient credits.
     """
+    if not PAYMENTS_ENABLED:
+        return True
+
     conn = get_db_connection()
     cursor = conn.cursor()
     row = None
@@ -402,7 +407,19 @@ async def get_current_user_profile(user: Dict[str, Any] = Depends(get_current_us
     studio = get_studio_state(user.get("studio_id"))
     return {
         "user": user,
-        "studio": studio
+        "studio": studio,
+        "payments_enabled": PAYMENTS_ENABLED
+    }
+
+
+@app.get("/api/config")
+def get_system_config():
+    """Returns runtime configuration and feature flags for frontend synchronization."""
+    return {
+        "payments_enabled": PAYMENTS_ENABLED,
+        "ai_status": AI_CONFIG.get("status", "local_fallback"),
+        "max_upload_size_mb": MAX_UPLOAD_SIZE // (1024 * 1024),
+        "max_image_megapixels": MAX_PIXELS // 1_000_000
     }
 
 
@@ -880,7 +897,7 @@ async def process_single_image(
     studio = get_studio_state(studio_id)
 
     # 1. Enforce Credit Requirement: Atomically deduct 1 credit per processed photo
-    if not deduct_studio_credit(studio["id"], count=1):
+    if PAYMENTS_ENABLED and not deduct_studio_credit(studio["id"], count=1):
         raise HTTPException(
             status_code=402,
             detail="Insufficient studio credits. Processing blocked. Please top up credits to continue."
@@ -1048,8 +1065,8 @@ def _run_batch_job_worker(
                 continue
 
             try:
-                # Deduct 1 credit per photo; block immediately if zero balance
-                if not deduct_studio_credit(studio_id, count=1):
+                # Deduct 1 credit per photo; block immediately if zero balance (when payments enabled)
+                if PAYMENTS_ENABLED and not deduct_studio_credit(studio_id, count=1):
                     item["status"] = "failed"
                     item["error"] = "Insufficient studio credits. Processing blocked."
                     processed_items.append({
@@ -1179,7 +1196,7 @@ async def batch_process_endpoint(
     target_items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
     needed_credits = len(target_items)
 
-    if needed_credits > 0 and studio["credit_balance"] < needed_credits:
+    if PAYMENTS_ENABLED and needed_credits > 0 and studio["credit_balance"] < needed_credits:
         raise HTTPException(
             status_code=402,
             detail=f"Insufficient studio credits. Batch requires {needed_credits} credits, but current balance is {studio['credit_balance']}."

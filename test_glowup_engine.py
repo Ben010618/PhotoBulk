@@ -200,52 +200,56 @@ def apply_studio_glow_radiance(img_f, skin_mask_f, glow_intensity=0.40, is_moren
     out = img_f * (1.0 - glow_factor) + (img_f + bloom * 0.45) * glow_factor
     return np.clip(out, 0, 255)
 
-print("Glow-up functions defined successfully!")
-img = cv2.imread("sample_grad.jpg")
-h, w = img.shape[:2]
-face_info = get_face_landmarks(img, w, h)
-print("Face info:", face_info['bbox'])
+if __name__ == '__main__':
+    print("Glow-up functions defined successfully!")
+    if os.path.exists("sample_grad.jpg"):
+        img = cv2.imread("sample_grad.jpg")
+        if img is not None:
+            h, w = img.shape[:2]
+            face_info = get_face_landmarks(img, w, h)
+            if face_info:
+                print("Face info:", face_info['bbox'])
 
-start = time.time()
-# Step 1: Skin mask
-x, y, fw, fh = face_info['bbox']
-skin_mask = np.zeros((h, w), dtype=np.uint8)
-cx, cy = x + fw // 2, y + int(fh * 0.52)
-cv2.ellipse(skin_mask, (cx, cy), (int(fw * 0.44), int(fh * 0.52)), 0, 0, 360, 255, -1)
-img_ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
-color_skin = cv2.inRange(img_ycrcb, np.array([60, 133, 80], dtype=np.uint8), np.array([235, 172, 132], dtype=np.uint8))
-skin_mask = cv2.bitwise_and(skin_mask, color_skin)
+                start = time.time()
+                # Step 1: Skin mask
+                x, y, fw, fh = face_info['bbox']
+                skin_mask = np.zeros((h, w), dtype=np.uint8)
+                cx, cy = x + fw // 2, y + int(fh * 0.52)
+                cv2.ellipse(skin_mask, (cx, cy), (int(fw * 0.44), int(fh * 0.52)), 0, 0, 360, 255, -1)
+                img_ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+                color_skin = cv2.inRange(img_ycrcb, np.array([60, 133, 80], dtype=np.uint8), np.array([235, 172, 132], dtype=np.uint8))
+                skin_mask = cv2.bitwise_and(skin_mask, color_skin)
 
-# Test Blemish Healing
-healed = detect_and_heal_blemishes(img, skin_mask, blemish_strength=0.80)
+                # Test Blemish Healing
+                healed = detect_and_heal_blemishes(img, skin_mask, blemish_strength=0.80)
 
-# Test Eye Catchlights
-healed_f = healed.astype(np.float32)
-eyes_enhanced = enhance_eye_catchlights_and_sclera(
-    healed_f,
-    face_info['right_eye'],
-    face_info['left_eye'],
-    fw,
-    eye_sharpen=0.40,
-    catchlight_boost=0.50
-)
+                # Test Eye Catchlights
+                healed_f = healed.astype(np.float32)
+                eyes_enhanced = enhance_eye_catchlights_and_sclera(
+                    healed_f,
+                    face_info['right_eye'],
+                    face_info['left_eye'],
+                    fw,
+                    eye_sharpen=0.40,
+                    catchlight_boost=0.50
+                )
 
-# Test Teeth Whitening
-teeth_whitened = whiten_teeth_naturally(
-    eyes_enhanced,
-    face_info['right_mouth'],
-    face_info['left_mouth'],
-    fw,
-    fh,
-    whitening_strength=0.60
-)
+                # Test Teeth Whitening
+                teeth_whitened = whiten_teeth_naturally(
+                    eyes_enhanced,
+                    face_info['right_mouth'],
+                    face_info['left_mouth'],
+                    fw,
+                    fh,
+                    whitening_strength=0.60
+                )
 
-# Test Studio Radiance Glow
-skin_mask_f = (cv2.GaussianBlur(skin_mask, (15, 15), 0).astype(np.float32) / 255.0)[:, :, np.newaxis]
-glowing = apply_studio_glow_radiance(teeth_whitened, skin_mask_f, glow_intensity=0.45, is_morena=True)
-final_result = np.clip(glowing, 0, 255).astype(np.uint8)
+                # Test Studio Radiance Glow
+                skin_mask_f = (cv2.GaussianBlur(skin_mask, (15, 15), 0).astype(np.float32) / 255.0)[:, :, np.newaxis]
+                glowing = apply_studio_glow_radiance(teeth_whitened, skin_mask_f, glow_intensity=0.45, is_morena=True)
+                final_result = np.clip(glowing, 0, 255).astype(np.uint8)
 
-elapsed = (time.time() - start) * 1000
-print(f"Glow-up complete in {elapsed:.1f}ms!")
-cv2.imwrite("test_glowup_result.jpg", final_result)
-print("Saved test_glowup_result.jpg successfully!")
+                elapsed = (time.time() - start) * 1000
+                print(f"Glow-up complete in {elapsed:.1f}ms!")
+                cv2.imwrite("test_glowup_result.jpg", final_result)
+                print("Saved test_glowup_result.jpg successfully!")

@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { PageView, UserSession } from './Navbar';
 import { apiClient } from '../api/apiClient';
+import { useUIStore } from '../store/useUIStore';
 
 interface AuthPageProps {
   onNavigate: (page: PageView) => void;
@@ -55,56 +56,43 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onNavigate, onLoginSuccess, 
       onLoginSuccess(session);
       onNavigate(data.user.role === 'admin' ? 'admin_dashboard' : 'user_dashboard');
       return;
-    } catch {
-      // Local fallback during decoupled frontend testing
-      if (email.trim().toLowerCase() === 'admin@kameraph.com') {
-        const adminSession: UserSession = {
-          name: 'KameraPh System Admin',
-          email: 'admin@kameraph.com',
-          role: 'admin',
-          studioName: 'KameraPh Central Administration & AI Lab',
-          credits: 9999,
-        };
-        onLoginSuccess(adminSession);
-        onNavigate('admin_dashboard');
-        return;
-      }
-
-      const session: UserSession = {
-        name: authMode === 'signup' ? name : 'Juan Dela Cruz',
-        email: email,
-        role: 'photographer',
-        studioName: authMode === 'signup' ? studioName : 'AuraGrad Creative Studio (Manila)',
-        credits: 150,
-      };
-      onLoginSuccess(session);
-      onNavigate('user_dashboard');
+    } catch (err: unknown) {
+      console.error('[AuthPage] Authentication failed:', err);
+      const errMsg = err instanceof Error ? err.message : 'Invalid email or password.';
+      useUIStore.getState().addToast('error', errMsg);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleQuickLogin = (demoRole: 'photographer' | 'admin') => {
-    if (demoRole === 'admin') {
-      const adminSession: UserSession = {
-        name: 'KameraPh System Admin',
-        email: 'admin@kameraph.com',
-        role: 'admin',
-        studioName: 'KameraPh Central Administration & AI Lab',
-        credits: 9999,
+  const handleQuickLogin = async (demoRole: 'photographer' | 'admin') => {
+    setIsLoading(true);
+    try {
+      const demoEmail = demoRole === 'admin' ? 'admin@kameraph.com' : 'editor@auragrad-studio.ph';
+      const demoPass = demoRole === 'admin' ? 'KameraPhAdminSecure2026!' : 'StudioEditor2026!';
+      setEmail(demoEmail);
+      setPassword(demoPass);
+
+      const formData = new FormData();
+      formData.append('email', demoEmail);
+      formData.append('password', demoPass);
+
+      const data = await apiClient.login(formData);
+      const session: UserSession = {
+        name: data.user.name || (data.user.role === 'admin' ? 'KameraPh Administrator' : name),
+        email: data.user.email,
+        role: data.user.role === 'admin' ? 'admin' : 'photographer',
+        studioName: data.user.studioName || studioName,
+        credits: data.user.credits ?? 150,
       };
-      onLoginSuccess(adminSession);
-      onNavigate('admin_dashboard');
-    } else {
-      const editorSession: UserSession = {
-        name: 'Juan Dela Cruz',
-        email: 'editor@auragrad-studio.ph',
-        role: 'photographer',
-        studioName: 'AuraGrad Creative Studio (Manila)',
-        credits: 150,
-      };
-      onLoginSuccess(editorSession);
-      onNavigate('user_dashboard');
+      onLoginSuccess(session);
+      onNavigate(data.user.role === 'admin' ? 'admin_dashboard' : 'user_dashboard');
+    } catch (err: unknown) {
+      console.error('[AuthPage] Quick login error:', err);
+      const errMsg = err instanceof Error ? err.message : 'Quick login failed.';
+      useUIStore.getState().addToast('error', errMsg);
+    } finally {
+      setIsLoading(false);
     }
   };
 
