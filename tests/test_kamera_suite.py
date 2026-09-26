@@ -1106,9 +1106,105 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertTrue(verify_password(test_pass, pwd_hash))
         self.assertFalse(verify_password("WrongPassword123!", pwd_hash))
 
+    def test_32_phase2_upload_300_images_scaling_and_rss(self):
+        """Phase 2: High-scale upload, raw EXIF/ICC preservation, non-blocking upload, and 300x8MB RSS under 2GB."""
+        import time
+        import psutil
+        from unittest.mock import patch
+        from project_store import project_store
+
+        # 1. EXIF and raw byte preservation test (using PIL to write standard compliant EXIF tags)
+        import io
+        from PIL import Image
+        pil_img = Image.fromarray(cv2.cvtColor(self.test_img, cv2.COLOR_BGR2RGB))
+        exif = pil_img.getexif()
+        exif[0x010e] = "KameraPh Studio Calibration Portrait 2026"
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", exif=exif, quality=95)
+        exif_jpeg_bytes = buf.getvalue()
+        self.assertIn(b"KameraPh Studio Calibration", exif_jpeg_bytes)
+
+        project_id = "proj_p2_test"
+        with patch("api_server.run_bulk_project_processing"):
+            res_exif = self.client.post(
+                "/api/batch-upload",
+                data={"project_id": project_id},
+                files=[("files", ("exif_portrait.jpg", exif_jpeg_bytes, "image/jpeg"))]
+            )
+        self.assertEqual(res_exif.status_code, 200)
+        exif_data = res_exif.json()
+        self.assertEqual(exif_data["uploaded_count"], 1)
+        self.assertIn("job_id", exif_data)
+        photo_id = exif_data["items"][0]["id"]
+
+        # Assert raw byte preservation on disk
+        photo_dir = project_store.get_photo_dir(project_id, photo_id)
+        saved_orig = photo_dir / "original.jpg"
+        self.assertTrue(saved_orig.exists())
+        with open(saved_orig, "rb") as f:
+            disk_bytes = f.read()
+        self.assertEqual(disk_bytes, exif_jpeg_bytes, "Raw uploaded bytes with EXIF must be preserved byte-for-byte")
+
+        # Assert preview is created (~1600px long edge max)
+        saved_preview = photo_dir / "preview.jpg"
+        self.assertTrue(saved_preview.exists())
+        prev_img = cv2.imread(str(saved_preview))
+        self.assertLessEqual(max(prev_img.shape[:2]), 1600)
+
+        # 2. Scale test: 300 generated images of ~8 MB each
+        # Construct valid 8 MB JPEG without corrupting markers (insert COM before SOS)
+        _, base_enc = cv2.imencode(".jpg", self.test_img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        base_bytes = bytes(base_enc)
+        sos_idx = base_bytes.find(b"\xff\xda")
+        before_sos = base_bytes[:sos_idx]
+        after_sos = base_bytes[sos_idx:]
+        target_size = 8 * 1024 * 1024
+        remaining = target_size - len(base_bytes)
+        com_blocks = []
+        while remaining > 4:
+            block_len = min(remaining - 4, 65530)
+            com = b"\xff\xfe" + (block_len + 2).to_bytes(2, "big") + (b"P" * block_len)
+            com_blocks.append(com)
+            remaining -= (block_len + 4)
+        jpeg_8mb = before_sos + b"".join(com_blocks) + after_sos
+        self.assertGreaterEqual(len(jpeg_8mb), 8 * 1024 * 1024)
+
+        # Mock heavy background processing during upload scale test
+        scale_proj = "proj_scale_300"
+        total_uploaded = 0
+        t0 = time.time()
+
+        with patch("api_server.run_bulk_project_processing") as mock_proc:
+            for chunk_idx in range(60): # 60 chunks * 5 files = 300 images
+                files = [(
+                    "files",
+                    (f"student_batch_{chunk_idx}_{i}.jpg", jpeg_8mb, "image/jpeg")
+                ) for i in range(5)]
+                res = self.client.post(
+                    "/api/batch-upload",
+                    data={"project_id": scale_proj},
+                    files=files
+                )
+                self.assertEqual(res.status_code, 200)
+                total_uploaded += len(res.json()["items"])
+
+        elapsed = time.time() - t0
+        self.assertEqual(total_uploaded, 300)
+
+        # Assert process RSS memory is well under 2 GB (2048 MB)
+        process = psutil.Process()
+        rss_bytes = process.memory_info().rss
+        rss_mb = rss_bytes / (1024 * 1024)
+        self.assertLess(rss_mb, 2048, f"Server RSS exceeded 2 GB: {rss_mb:.2f} MB")
+
+        # Verify on-disk project contains all 300 photos
+        photos = project_store.list_photos(scale_proj)
+        self.assertEqual(len(photos), 300)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

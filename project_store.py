@@ -85,17 +85,55 @@ class ProjectStore:
         project_id: str,
         photo_id: str,
         filename: str,
-        img_bgr: np.ndarray,
+        img_bgr: Optional[np.ndarray] = None,
+        raw_bytes: Optional[bytes] = None,
         studio_id: str = "default_studio",
         custom_settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Saves original image, generates preview-size image, and initializes settings.json."""
+        """
+        Saves original uploaded bytes (preserving EXIF and ICC metadata),
+        creates a separate working JPEG if needed, generates a preview-size image,
+        and initializes settings.json. Fast operation with zero heavy ML inference.
+        """
         photo_dir = self.get_photo_dir(project_id, photo_id)
-        h, w = img_bgr.shape[:2]
 
-        # 1. Save original master
-        orig_path = photo_dir / "original.jpg"
-        cv2.imwrite(str(orig_path), img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        # 1. Determine original extension and save raw uploaded bytes directly
+        ext = Path(filename).suffix.lower() if filename else ".jpg"
+        if not ext:
+            ext = ".jpg"
+
+        orig_ext_path = photo_dir / f"original{ext}"
+        working_jpg_path = photo_dir / "original.jpg"
+
+        if raw_bytes is not None:
+            # Write exact raw uploaded bytes preserving 100% of EXIF, ICC, and original sensor data
+            with open(orig_ext_path, "wb") as f:
+                f.write(raw_bytes)
+            
+            # If original is JPEG, working JPEG is identical to raw bytes
+            if ext in [".jpg", ".jpeg"]:
+                if orig_ext_path != working_jpg_path:
+                    with open(working_jpg_path, "wb") as f:
+                        f.write(raw_bytes)
+            
+            # Decode for preview generation if img_bgr not provided
+            if img_bgr is None:
+                img_bgr = cv2.imdecode(np.frombuffer(raw_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if img_bgr is None:
+                    raise ValueError(f"Failed to decode uploaded image: {filename}")
+        else:
+            # Fallback if only numpy array provided
+            if img_bgr is None:
+                raise ValueError("Either raw_bytes or img_bgr must be provided to save_uploaded_photo")
+            cv2.imwrite(str(orig_ext_path), img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            if orig_ext_path != working_jpg_path:
+                cv2.imwrite(str(working_jpg_path), img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
+        # If non-JPEG format (e.g. PNG, WebP), ensure working JPEG is written for downstream ML
+        if not working_jpg_path.exists():
+            cv2.imwrite(str(working_jpg_path), img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
+        h, w = img_bgr.shape[:2]
 
         # 2. Save preview-size image (~1600px long edge)
         max_edge = max(w, h)

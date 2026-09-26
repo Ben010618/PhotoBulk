@@ -49,19 +49,14 @@ export const UploadView: React.FC<UploadViewProps> = ({
     setFileCount(validFiles.length);
     setStatusMessage(`Uploading ${validFiles.length} photos and caching neural features...`);
 
-    try {
-      await apiClient.batchUpload(validFiles, projectId, (pct) => {
-        // Map upload phase to 0-70%, then precomputing is 70-100%
-        const displayPct = Math.min(85, Math.max(10, Math.round(pct * 0.85)));
-        setProgress(displayPct);
-        if (pct >= 100) {
-          setStatusMessage('Pre-computing facial landmarks and soft alpha mattes...');
-        }
+      await apiClient.batchUpload(validFiles, projectId, (completed, total, pct) => {
+        setProgress(pct);
+        setStatusMessage(`Uploading: ${completed} of ${total} photos completed (${pct}%)...`);
       });
 
       setProgress(100);
-      setStatusMessage('Batch analysis complete!');
-      addToast('success', `Successfully processed ${validFiles.length} portraits into ${projectTitle}.`);
+      setStatusMessage('Upload complete! Background analysis active.');
+      addToast('success', `Successfully uploaded ${validFiles.length} portraits into ${projectTitle}.`);
 
       setTimeout(() => {
         onUploadSuccess();

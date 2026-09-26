@@ -1103,54 +1103,94 @@ def process_single_image(
 
 
 @app.post("/api/batch-upload")
-def batch_upload_endpoint(
+async def batch_upload_endpoint(
+    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     project_id: str = Form("default_project"),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
-    """Validates, stages portrait uploads into the studio's on-disk project store, and precomputes features."""
+    """
+    High-scale non-blocking upload endpoint:
+      - Validates and saves original bytes & preview image.
+      - Never runs face detection or matting inside the HTTP request.
+      - Dispatches background analysis via worker_pool.run_bulk_project_processing.
+      - Returns immediately to caller with uploaded records.
+    """
     studio_id = current_user.get("studio_id", "default_studio") if current_user else "default_studio"
     target_project = validate_id(project_id or "default_project", "project_id")
     project_store.get_or_create_project(target_project, studio_id=studio_id)
     results = []
+    new_photo_ids = []
 
     for idx, f in enumerate(files):
-        contents = f.file.read()
+        contents = await f.read()
         img_bgr = validate_image_upload(contents, f.filename, f.content_type)
         
         photo_id = f"batch-{int(time.time()*1000)}-{idx}"
+        new_photo_ids.append(photo_id)
         
-        # 1. Save to persistent on-disk project folder
-        project_store.save_uploaded_photo(target_project, photo_id, f.filename, img_bgr, studio_id)
-        
-        # 2. Precompute and cache heavy features once (face landmarks & alpha matte)
-        features = project_store.compute_and_cache_heavy_features(target_project, photo_id)
-        analysis = features.get("analysis", {})
-        face_info = features.get("face_info")
+        # 1. Save original bytes (preserving EXIF/ICC) and preview (~1600px)
+        project_store.save_uploaded_photo(
+            target_project, photo_id, f.filename, img_bgr=img_bgr, raw_bytes=contents, studio_id=studio_id
+        )
 
-        BATCH_STORE[photo_id] = {
-            "id": photo_id,
-            "project_id": target_project,
-            "studio_id": studio_id,
-            "filename": f.filename,
-            "img_bgr": img_bgr,
-            "enhanced_bgr": img_bgr,
-            "face_info": face_info,
-            "analysis": analysis,
-            "status": "ready"
-        }
-        
         results.append({
             "id": photo_id,
             "name": f.filename,
             "previewUrl": f"/api/projects/{target_project}/photos/{photo_id}/preview",
             "originalUrl": f"/api/projects/{target_project}/photos/{photo_id}/original",
             "enhancedUrl": f"/api/projects/{target_project}/photos/{photo_id}/preview",
-            "analysis": analysis,
-            "status": "ready"
+            "analysis": {},
+            "status": "staged"
         })
 
-    return {"uploaded_count": len(results), "items": results, "project_id": target_project}
+    # Start non-blocking background analysis job using worker pool
+    job_id = None
+    if new_photo_ids:
+        job_id = f"job_analysis_{target_project}_{int(time.time()*1000)}"
+        ACTIVE_JOBS[job_id] = {
+            "job_id": job_id,
+            "project_id": target_project,
+            "status": "processing",
+            "progress": 0,
+            "total": len(new_photo_ids),
+            "processed": 0,
+            "message": "Analyzing facial geometry and subject masks...",
+            "result": None,
+            "error": None
+        }
+
+        def _bg_analysis_worker():
+            def _prog(processed, total, res):
+                if job_id in ACTIVE_JOBS:
+                    ACTIVE_JOBS[job_id]["processed"] = processed
+                    ACTIVE_JOBS[job_id]["progress"] = int((processed / max(total, 1)) * 100)
+                    ACTIVE_JOBS[job_id]["message"] = f"Analyzed {processed}/{total} portraits"
+
+            try:
+                run_bulk_project_processing(
+                    target_project,
+                    new_photo_ids,
+                    progress_callback=_prog
+                )
+                if job_id in ACTIVE_JOBS:
+                    ACTIVE_JOBS[job_id]["status"] = "completed"
+                    ACTIVE_JOBS[job_id]["progress"] = 100
+                    ACTIVE_JOBS[job_id]["message"] = "Analysis complete"
+            except Exception as e:
+                logger.error(f"Background analysis error for project {target_project}: {e}")
+                if job_id in ACTIVE_JOBS:
+                    ACTIVE_JOBS[job_id]["status"] = "failed"
+                    ACTIVE_JOBS[job_id]["error"] = str(e)
+
+        background_tasks.add_task(_bg_analysis_worker)
+
+    return {
+        "uploaded_count": len(results),
+        "items": results,
+        "project_id": target_project,
+        "job_id": job_id
+    }
 
 # =========================================================================
 # ASYNCHRONOUS BACKGROUND JOBS & BATCH WORKER

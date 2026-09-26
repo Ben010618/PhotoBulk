@@ -303,27 +303,68 @@ export const apiClient = {
   async batchUpload(
     files: File[],
     projectId: string = 'default_project',
-    onProgress?: (progressPct: number) => void
+    onProgress?: (completed: number, total: number, progressPct: number) => void
   ): Promise<BatchUploadResponse> {
-    try {
+    const CHUNK_SIZE = 4; // 3 to 5 files per chunk
+    const CONCURRENCY = 3; // 3 requests in parallel
+    const total = files.length;
+    let completed = 0;
+    const allItems: PhotoItem[] = [];
+
+    // Chunk files array
+    const chunks: File[][] = [];
+    for (let i = 0; i < files.length; i += CHUNK_SIZE) {
+      chunks.push(files.slice(i, i + CHUNK_SIZE));
+    }
+
+    // Helper to upload a single chunk with 1 automatic retry
+    const uploadChunk = async (chunk: File[], isRetry = false): Promise<BatchUploadResponse> => {
       const formData = new FormData();
-      files.forEach((file) => formData.append('files', file));
+      chunk.forEach((f) => formData.append('files', f));
       formData.append('project_id', projectId);
 
-      const res = await axiosInstance.post<BatchUploadResponse>('/api/batch-upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (progressEvent) => {
-          if (onProgress && progressEvent.total) {
-            const pct = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-            onProgress(pct);
+      try {
+        const res = await axiosInstance.post<BatchUploadResponse>('/api/batch-upload', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 0, // No 45s axios timeout for uploads
+        });
+        completed += chunk.length;
+        if (onProgress) {
+          const pct = Math.min(100, Math.round((completed / total) * 100));
+          onProgress(completed, total, pct);
+        }
+        return res.data;
+      } catch (err: unknown) {
+        if (!isRetry) {
+          console.warn(`[apiClient.batchUpload] Retrying failed chunk of ${chunk.length} files once...`);
+          return uploadChunk(chunk, true);
+        }
+        console.error('[apiClient.batchUpload] Chunk upload failed after retry:', err);
+        throw err;
+      }
+    };
+
+    // Process chunks with 3 concurrent workers
+    const queue = [...chunks];
+    const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+      while (queue.length > 0) {
+        const chunk = queue.shift();
+        if (chunk) {
+          const res = await uploadChunk(chunk);
+          if (res.items) {
+            allItems.push(...res.items);
           }
-        },
-      });
-      return res.data;
-    } catch (err: unknown) {
-      console.error('[apiClient.batchUpload] Batch upload failed:', err);
-      throw err;
-    }
+        }
+      }
+    });
+
+    await Promise.all(workers);
+
+    return {
+      uploaded_count: allItems.length,
+      items: allItems,
+      project_id: projectId,
+    };
   },
 
   async batchProcess(
