@@ -19,11 +19,13 @@ Guarantees:
 """
 
 import os
+import re
 import json
 import time
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
+from fastapi import HTTPException
 import cv2
 import numpy as np
 
@@ -37,19 +39,44 @@ logger = logging.getLogger("kameraph.project_store")
 
 PREVIEW_LONG_EDGE = 1600
 
+ID_REGEX = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def validate_id(identifier: str, name: str = "id") -> str:
+    """Validates that project_id or photo_id strictly matches ^[A-Za-z0-9_-]{1,64}$ with no path traversal."""
+    if not identifier or not isinstance(identifier, str) or not ID_REGEX.match(identifier):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {name} '{identifier}': must strictly match pattern ^[A-Za-z0-9_-]{{1,64}}$ with no path traversal."
+        )
+    return identifier
+
 
 class ProjectStore:
     def __init__(self, base_dir: Optional[str] = None):
-        self.base_dir = Path(base_dir or PROJECTS_DIR)
+        self.base_dir = Path(base_dir or PROJECTS_DIR).resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def get_project_dir(self, project_id: str = "default_project") -> Path:
-        p_dir = self.base_dir / project_id
+        validate_id(project_id, "project_id")
+        p_dir = (self.base_dir / project_id).resolve()
+        if not p_dir.is_relative_to(self.base_dir):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Security violation: project_id '{project_id}' attempts directory traversal outside PROJECTS_DIR."
+            )
         p_dir.mkdir(parents=True, exist_ok=True)
         return p_dir
 
     def get_photo_dir(self, project_id: str, photo_id: str) -> Path:
-        photo_dir = self.get_project_dir(project_id) / photo_id
+        validate_id(photo_id, "photo_id")
+        p_dir = self.get_project_dir(project_id)
+        photo_dir = (p_dir / photo_id).resolve()
+        if not photo_dir.is_relative_to(self.base_dir):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Security violation: photo_id '{photo_id}' attempts directory traversal outside PROJECTS_DIR."
+            )
         photo_dir.mkdir(parents=True, exist_ok=True)
         return photo_dir
 
@@ -566,25 +593,35 @@ class ProjectStore:
             "skipped_photo_ids": skipped_photos
         }
 
-    def list_projects(self) -> List[Dict[str, Any]]:
-        """Lists all existing projects in store."""
+    def list_projects(self, studio_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Lists all existing projects in store belonging to studio_id (or all if None)."""
         if not self.base_dir.exists():
             return []
         projects = []
         for p_dir in self.base_dir.iterdir():
-            if p_dir.is_dir():
-                photos = self.list_photos(p_dir.name)
+            if p_dir.is_dir() and not p_dir.name.startswith("."):
                 project_meta = self.load_json(p_dir / "project.json") or {}
+                owner_studio = project_meta.get("owner_studio_id", "default_studio")
+                if studio_id is not None and owner_studio != studio_id:
+                    continue
+                photos = self.list_photos(p_dir.name)
                 projects.append({
                     "id": p_dir.name,
                     "title": project_meta.get("title", p_dir.name.replace("_", " ").title()),
+                    "owner_studio_id": owner_studio,
                     "photo_count": len(photos),
                     "created_at": project_meta.get("created_at", time.time())
                 })
         return projects
 
-    def get_or_create_project(self, project_id: str, title: Optional[str] = None) -> Dict[str, Any]:
-        """Gets or creates project directory with metadata."""
+    def get_or_create_project(
+        self,
+        project_id: str,
+        title: Optional[str] = None,
+        studio_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Gets or creates project directory with metadata and owner studio_id."""
+        validate_id(project_id, "project_id")
         p_dir = self.get_project_dir(project_id)
         meta_file = p_dir / "project.json"
         meta = self.load_json(meta_file)
@@ -592,9 +629,27 @@ class ProjectStore:
             meta = {
                 "id": project_id,
                 "title": title or project_id.replace("_", " ").title(),
+                "owner_studio_id": studio_id or "default_studio",
                 "created_at": time.time()
             }
             self.save_json(meta_file, meta)
+        elif studio_id and not meta.get("owner_studio_id"):
+            meta["owner_studio_id"] = studio_id
+            self.save_json(meta_file, meta)
+        return meta
+
+    def get_project(self, project_id: str, studio_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Retrieves project metadata. If studio_id provided, asserts ownership."""
+        validate_id(project_id, "project_id")
+        p_dir = (self.base_dir / project_id).resolve()
+        if not p_dir.is_relative_to(self.base_dir):
+            raise HTTPException(status_code=400, detail="Security violation: Path traversal detected")
+        meta_file = p_dir / "project.json"
+        if not meta_file.exists():
+            return None
+        meta = self.load_json(meta_file) or {}
+        if studio_id and meta.get("owner_studio_id") and meta.get("owner_studio_id") != studio_id:
+            return None
         return meta
 
     def list_photos(self, project_id: str = "default_project") -> List[Dict[str, Any]]:

@@ -41,4 +41,20 @@ ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/tiff"}
 PORT = int(os.environ.get("PORT", 8000))
 HOST = os.environ.get("HOST", "127.0.0.1")
 DEBUG = os.environ.get("DEBUG", "True").lower() in ("true", "1", "yes")
-JWT_SECRET = os.environ.get("JWT_SECRET", "kameraph_super_secret_jwt_key_philippines_2026")
+DEFAULT_JWT_SECRET = "kameraph_super_secret_jwt_key_philippines_2026"
+JWT_SECRET = os.environ.get("JWT_SECRET", DEFAULT_JWT_SECRET)
+
+
+def check_jwt_secret_security(debug_mode: bool = DEBUG, secret: str = JWT_SECRET) -> None:
+    """Refuses to start when JWT_SECRET is the default value and DEBUG is false."""
+    if not debug_mode and secret == DEFAULT_JWT_SECRET:
+        raise RuntimeError(
+            "CRITICAL SECURITY CONFIGURATION ERROR: Server refused to start. "
+            "JWT_SECRET is set to the default insecure value while DEBUG is False. "
+            "Please set a strong, unique JWT_SECRET environment variable in production."
+        )
+
+
+# Run startup check immediately if already running in production mode
+if not DEBUG and JWT_SECRET == DEFAULT_JWT_SECRET:
+    check_jwt_secret_security(DEBUG, JWT_SECRET)

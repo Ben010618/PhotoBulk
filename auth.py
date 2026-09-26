@@ -15,7 +15,7 @@ import json
 import base64
 from typing import Optional, Dict, Any
 from fastapi import Request, HTTPException, Depends, Header
-from init_db import get_db_connection, hash_password
+from init_db import get_db_connection, hash_password, verify_password
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "kameraph_super_secret_jwt_key_philippines_2026")
 
@@ -73,8 +73,7 @@ def authenticate_user(email: str, password: str) -> Optional[Dict[str, Any]]:
     if not user:
         return None
         
-    pwd_hash = hash_password(password)
-    if not hmac.compare_digest(user["password_hash"], pwd_hash):
+    if not verify_password(password, user["password_hash"]):
         return None
         
     return {
@@ -87,10 +86,15 @@ def authenticate_user(email: str, password: str) -> Optional[Dict[str, Any]]:
 
 
 async def get_current_user_optional(request: Request) -> Optional[Dict[str, Any]]:
-    """Extracts authenticated user from Authorization header if present."""
+    """Extracts authenticated user from Authorization header or 'token' query param if present."""
+    token = None
     auth_header = request.headers.get("Authorization") or ""
     if auth_header.startswith("Bearer "):
         token = auth_header.replace("Bearer ", "").strip()
+    elif "token" in request.query_params:
+        token = request.query_params["token"].strip()
+
+    if token:
         payload = verify_token(token)
         if payload:
             return payload

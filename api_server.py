@@ -54,7 +54,7 @@ from init_db import (
     update_job_db,
     fetch_job_db
 )
-from config import PAYMENTS_ENABLED
+from config import PAYMENTS_ENABLED, check_jwt_secret_security
 from auth import get_current_user, get_current_user_optional, require_admin, authenticate_user, create_access_token
 from r2_storage import (
     storage,
@@ -80,7 +80,7 @@ from pipeline import (
     detect_actual_engine,
     generate_watermarked_proof
 )
-from project_store import project_store
+from project_store import project_store, validate_id
 from worker_pool import run_bulk_project_processing
 from export_engine import execute_bulk_export, EXPORTS_DIR
 
@@ -129,7 +129,15 @@ class JobStatusResponse(BaseModel):
 # Auto-instantiate database schema
 init_database()
 
-app = FastAPI(title="KameraPh Studio Engine API", version="5.2.0")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager: runs startup and shutdown security checks."""
+    check_jwt_secret_security()
+    yield
+
+app = FastAPI(title="KameraPh Studio Engine API", version="5.2.0", lifespan=lifespan)
 
 # 1. Tightened Production CORS Configuration
 is_production = os.environ.get("DEBUG", "False").lower() in ("false", "0", "no")
@@ -1101,9 +1109,9 @@ def batch_upload_endpoint(
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """Validates, stages portrait uploads into the studio's on-disk project store, and precomputes features."""
-    studio_id = current_user.get("studio_id") if current_user else "default_studio"
-    target_project = project_id or "default_project"
-    project_store.get_or_create_project(target_project)
+    studio_id = current_user.get("studio_id", "default_studio") if current_user else "default_studio"
+    target_project = validate_id(project_id or "default_project", "project_id")
+    project_store.get_or_create_project(target_project, studio_id=studio_id)
     results = []
 
     for idx, f in enumerate(files):
@@ -1502,29 +1510,61 @@ class BulkExportRequest(BaseModel):
     studio_name: Optional[str] = None
     include_contact_sheet: bool = True
 
+def check_project_ownership(project_id: str, current_user: Dict[str, Any]) -> Dict[str, Any]:
+    """Validates project_id, ensures no traversal, and asserts logged-in studio ownership."""
+    validate_id(project_id, "project_id")
+    studio_id = current_user.get("studio_id", "default_studio")
+    project = project_store.get_project(project_id, studio_id=studio_id)
+    if not project:
+        existing = project_store.get_project(project_id)
+        if existing:
+            raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this studio project.")
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
+    return project
+
+
 @app.get("/api/projects")
-def list_projects_endpoint(current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
-    return {"projects": project_store.list_projects()}
+def list_projects_endpoint(current_user: Dict[str, Any] = Depends(get_current_user)):
+    studio_id = current_user.get("studio_id", "default_studio")
+    return {"projects": project_store.list_projects(studio_id=studio_id)}
 
 @app.post("/api/projects")
-def create_project_endpoint(req: CreateProjectRequest, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+def create_project_endpoint(
+    req: CreateProjectRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     pid = req.project_id or f"proj_{uuid.uuid4().hex[:8]}"
-    project = project_store.get_or_create_project(pid, title=req.title)
+    validate_id(pid, "project_id")
+    studio_id = current_user.get("studio_id", "default_studio")
+    project = project_store.get_or_create_project(pid, title=req.title, studio_id=studio_id)
     return project
 
 @app.get("/api/projects/{project_id}")
-def get_project_details(project_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
-    project = project_store.get_or_create_project(project_id)
+def get_project_details(
+    project_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    project = check_project_ownership(project_id, current_user)
     photos = project_store.list_photos(project_id)
     return {"project": project, "photos": photos, "total_photos": len(photos)}
 
 @app.get("/api/projects/{project_id}/photos")
-def list_project_photos(project_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+def list_project_photos(
+    project_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    check_project_ownership(project_id, current_user)
     photos = project_store.list_photos(project_id)
     return {"photos": photos, "total": len(photos)}
 
 @app.get("/api/projects/{project_id}/photos/{photo_id}/preview")
-def get_project_photo_preview(project_id: str, photo_id: str):
+def get_project_photo_preview(
+    project_id: str,
+    photo_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    check_project_ownership(project_id, current_user)
+    validate_id(photo_id, "photo_id")
     photo_dir = project_store.get_photo_dir(project_id, photo_id)
     preview_p = photo_dir / "preview.jpg"
     if not preview_p.exists():
@@ -1534,19 +1574,43 @@ def get_project_photo_preview(project_id: str, photo_id: str):
     return FileResponse(str(preview_p), media_type="image/jpeg")
 
 @app.get("/api/projects/{project_id}/photos/{photo_id}/original")
-def get_project_photo_original(project_id: str, photo_id: str):
+def get_project_photo_original(
+    project_id: str,
+    photo_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    check_project_ownership(project_id, current_user)
+    validate_id(photo_id, "photo_id")
     orig_p = project_store.get_photo_dir(project_id, photo_id) / "original.jpg"
     if not orig_p.exists():
         raise HTTPException(status_code=404, detail="Photo not found")
     return FileResponse(str(orig_p), media_type="image/jpeg")
+
+@app.get("/api/projects/{project_id}/photos/{photo_id}/master")
+def get_project_photo_master(
+    project_id: str,
+    photo_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    check_project_ownership(project_id, current_user)
+    validate_id(photo_id, "photo_id")
+    photo_dir = project_store.get_photo_dir(project_id, photo_id)
+    master_p = photo_dir / "master.jpg"
+    if not master_p.exists():
+        master_p = photo_dir / "original.jpg"
+    if not master_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    return FileResponse(str(master_p), media_type="image/jpeg")
 
 @app.post("/api/projects/{project_id}/photos/{photo_id}/settings")
 def update_photo_settings_endpoint(
     project_id: str,
     photo_id: str,
     req: PhotoSettingsRequest,
-    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
+    check_project_ownership(project_id, current_user)
+    validate_id(photo_id, "photo_id")
     updated = project_store.update_photo_settings(
         project_id, photo_id, req.settings, is_user_override=req.is_user_override
     )
@@ -1558,8 +1622,10 @@ def update_photo_settings_endpoint(
 def clear_photo_override_endpoint(
     project_id: str,
     photo_id: str,
-    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
+    check_project_ownership(project_id, current_user)
+    validate_id(photo_id, "photo_id")
     cleared = project_store.clear_photo_override(project_id, photo_id)
     return {"success": True, "settings": cleared}
 
@@ -1568,14 +1634,10 @@ def apply_look_to_all_photos(
     project_id: str,
     source_photo_id: str,
     exclude_overridden: bool = Query(True),
-    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
-    """
-    Applies source photo settings to all photos in the project:
-      - Respects per-photo user overrides (keeps customized portraits intact).
-      - Per-photo automatic corrections (exposure compensation and white balance) run,
-        harmonizing all portraits across differing studio light.
-    """
+    check_project_ownership(project_id, current_user)
+    validate_id(source_photo_id, "photo_id")
     try:
         res = project_store.apply_settings_to_project(
             project_id=project_id,
@@ -1595,11 +1657,12 @@ def trigger_project_export(
     project_id: str,
     req: BulkExportRequest,
     background_tasks: BackgroundTasks,
-    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Triggers asynchronous full-resolution bulk export job."""
+    check_project_ownership(project_id, current_user)
     export_id = f"exp_{int(time.time()*1000)}"
-    studio_id = current_user.get("studio_id") if current_user else "default_studio"
+    studio_id = current_user.get("studio_id", "default_studio")
     studio = get_studio_state(studio_id)
     studio_name = req.studio_name or studio.get("studio_name", "AuraGrad Creative Studio")
 
@@ -1658,7 +1721,13 @@ def trigger_project_export(
     }
 
 @app.get("/api/projects/{project_id}/exports/{export_id}/status")
-def get_export_status(project_id: str, export_id: str):
+def get_export_status(
+    project_id: str,
+    export_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    check_project_ownership(project_id, current_user)
+    validate_id(export_id, "export_id")
     job = ACTIVE_JOBS.get(export_id)
     if not job:
         raise HTTPException(status_code=404, detail="Export job not found")
@@ -1668,8 +1737,10 @@ def get_export_status(project_id: str, export_id: str):
 def download_export_zip(
     project_id: str,
     export_id: str,
-    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
+    check_project_ownership(project_id, current_user)
+    validate_id(export_id, "export_id")
     job = ACTIVE_JOBS.get(export_id)
     zip_path = None
     if job and job.get("result"):

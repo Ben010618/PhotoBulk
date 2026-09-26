@@ -7,7 +7,9 @@ import os
 import sqlite3
 import uuid
 import hashlib
+import hmac
 import datetime
+import bcrypt
 from typing import Optional, Dict, Any, List
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,9 +25,21 @@ def get_db_connection():
 
 
 def hash_password(password: str) -> str:
-    """Computes SHA-256 hash with salt for secure credential storage."""
-    salt = os.environ.get("JWT_SECRET", "kameraph_salt_2026")
-    return hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
+    """Computes a secure bcrypt hash for credential storage."""
+    salt = bcrypt.gensalt(rounds=12)
+    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verifies a plain password against a bcrypt hash, with legacy SHA-256 fallback."""
+    try:
+        if hashed_password.startswith("$2"):
+            return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+        salt = os.environ.get("JWT_SECRET", "kameraph_salt_2026")
+        legacy_hash = hashlib.sha256((plain_password + salt).encode("utf-8")).hexdigest()
+        return hmac.compare_digest(hashed_password, legacy_hash)
+    except Exception:
+        return False
 
 
 def init_database():
@@ -180,14 +194,30 @@ def init_database():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (studio_id, now, "AuraGrad Creative Studio (Manila)", "Juan Dela Cruz", "editor@auragrad-studio.ph", "+63 917 123 4567", "Manila", 150, "studio_pro"))
 
-        # Seed super admin and studio editor
-        admin_pass_hash = hash_password("KameraPhAdminSecure2026!")
+        # Seed super admin and studio editor credentials from environment variables
+        is_debug = os.environ.get("DEBUG", "True").lower() in ("true", "1", "yes")
+        admin_pass = os.environ.get("ADMIN_SEED_PASSWORD")
+        studio_pass = os.environ.get("STUDIO_SEED_PASSWORD")
+
+        if not admin_pass:
+            if is_debug:
+                admin_pass = "dev_admin_password_123"
+            else:
+                raise RuntimeError("ADMIN_SEED_PASSWORD must be configured in environment when DEBUG is False")
+
+        if not studio_pass:
+            if is_debug:
+                studio_pass = "dev_studio_password_123"
+            else:
+                raise RuntimeError("STUDIO_SEED_PASSWORD must be configured in environment when DEBUG is False")
+
+        admin_pass_hash = hash_password(admin_pass)
         cursor.execute("""
             INSERT INTO users (id, created_at, email, password_hash, full_name, role, studio_id)
             VALUES (?, ?, ?, ?, ?, ?, ?);
         """, (str(uuid.uuid4()), now, "admin@kameraph.com", admin_pass_hash, "KameraPh System Admin", "super_admin", None))
 
-        user_pass_hash = hash_password("StudioEditor2026!")
+        user_pass_hash = hash_password(studio_pass)
         cursor.execute("""
             INSERT INTO users (id, created_at, email, password_hash, full_name, role, studio_id)
             VALUES (?, ?, ?, ?, ?, ?, ?);

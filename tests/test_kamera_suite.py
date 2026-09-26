@@ -837,7 +837,7 @@ class TestKameraPhSuite(unittest.TestCase):
         from project_store import project_store
 
         proj_id = f"test_proj_step7_{int(time.time()*1000)}"
-        project_store.get_or_create_project(proj_id, title="Step 7 Test Project")
+        project_store.get_or_create_project(proj_id, title="Step 7 Test Project", studio_id="studio_test_22")
 
         # Create 3 synthetic test images
         synth_img = np.full((600, 500, 3), 160, dtype=np.uint8)
@@ -883,8 +883,12 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertEqual(target_settings["skin_smoothing"], 0.82)
         self.assertEqual(target_settings["backdrop_type"], "warm_brown")
 
-        # 6. Verify API endpoint
-        res_api = self.client.post(f"/api/projects/{proj_id}/photos/p_source/apply-to-all?exclude_overridden=true")
+        # 6. Verify API endpoint with authenticated studio admin
+        token = create_access_token({"id": "user-22", "email": "test22@auragrad.ph", "role": "studio_admin", "studio_id": "studio_test_22"})
+        res_api = self.client.post(
+            f"/api/projects/{proj_id}/photos/p_source/apply-to-all?exclude_overridden=true",
+            headers={"Authorization": f"Bearer {token}"}
+        )
         self.assertEqual(res_api.status_code, 200)
         api_data = res_api.json()
         self.assertTrue(api_data["success"])
@@ -998,6 +1002,109 @@ class TestKameraPhSuite(unittest.TestCase):
         for key in ["skin", "facial_skin", "hair", "eyes", "brows", "lips", "neck", "hat", "cloth"]:
             self.assertIn(key, all_masks)
             self.assertEqual(all_masks[key].shape, self.astronaut_bgr.shape[:2])
+
+
+    def test_29_phase1_security_id_validation_and_path_traversal(self):
+        """Phase 1: Validate project_id and photo_id everywhere with ^[A-Za-z0-9_-]{1,64}$ and reject path traversal with 400."""
+        from fastapi import HTTPException
+        from project_store import project_store, validate_id
+
+        # 1. Direct validation tests
+        with self.assertRaises(HTTPException) as ctx:
+            validate_id("../../x", "project_id")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        with self.assertRaises(HTTPException) as ctx:
+            validate_id("proj/evil", "project_id")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        with self.assertRaises(HTTPException) as ctx:
+            validate_id("proj<script>", "project_id")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        with self.assertRaises(HTTPException) as ctx:
+            validate_id("a" * 65, "project_id")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        # Valid IDs must pass
+        self.assertEqual(validate_id("project_2026-A", "project_id"), "project_2026-A")
+
+        # 2. Path containment check on ProjectStore
+        with self.assertRaises(HTTPException) as ctx:
+            project_store.get_project_dir("../../x")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        with self.assertRaises(HTTPException) as ctx:
+            project_store.get_photo_dir("valid_proj", "../../x")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+        # 3. HTTP endpoint rejects path traversal with 400
+        token = create_access_token({"id": "u1", "email": "u1@test.ph", "role": "studio_admin", "studio_id": "studio_sec"})
+        res = self.client.get("/api/projects/..%2F..%2Fx", headers={"Authorization": f"Bearer {token}"})
+        self.assertIn(res.status_code, [400, 404])
+        # If passed as raw invalid characters
+        res_invalid = self.client.get("/api/projects/bad*project!id", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(res_invalid.status_code, 400)
+
+    def test_30_phase1_security_login_and_multi_tenant_isolation(self):
+        """Phase 1: Require login on /api/projects. Store owner studio_id in project.json and isolate studios."""
+        # 1. Unauthenticated requests to /api/projects must be rejected with 401
+        res_unauth_list = self.client.get("/api/projects")
+        self.assertEqual(res_unauth_list.status_code, 401)
+
+        res_unauth_create = self.client.post("/api/projects", json={"title": "Unauth Project"})
+        self.assertEqual(res_unauth_create.status_code, 401)
+
+        res_unauth_detail = self.client.get("/api/projects/sample_proj")
+        self.assertEqual(res_unauth_detail.status_code, 401)
+
+        # 2. Authenticated Studio A creates a project
+        token_a = create_access_token({"id": "ua", "email": "studioA@test.ph", "role": "studio_admin", "studio_id": "studio_alpha"})
+        res_create_a = self.client.post(
+            "/api/projects",
+            json={"title": "Studio Alpha Class 2026", "project_id": "proj_studio_alpha"},
+            headers={"Authorization": f"Bearer {token_a}"}
+        )
+        self.assertEqual(res_create_a.status_code, 200)
+        proj_a = res_create_a.json()
+        self.assertEqual(proj_a["owner_studio_id"], "studio_alpha")
+
+        # 3. Studio A lists projects -> sees proj_studio_alpha
+        res_list_a = self.client.get("/api/projects", headers={"Authorization": f"Bearer {token_a}"})
+        self.assertEqual(res_list_a.status_code, 200)
+        pids_a = [p["id"] for p in res_list_a.json()["projects"]]
+        self.assertIn("proj_studio_alpha", pids_a)
+
+        # 4. Studio B lists projects -> does NOT see Studio A's project
+        token_b = create_access_token({"id": "ub", "email": "studioB@test.ph", "role": "studio_admin", "studio_id": "studio_beta"})
+        res_list_b = self.client.get("/api/projects", headers={"Authorization": f"Bearer {token_b}"})
+        self.assertEqual(res_list_b.status_code, 200)
+        pids_b = [p["id"] for p in res_list_b.json()["projects"]]
+        self.assertNotIn("proj_studio_alpha", pids_b)
+
+        # 5. Studio B attempts to open Studio A's project directly -> rejected with 403
+        res_access_b = self.client.get("/api/projects/proj_studio_alpha", headers={"Authorization": f"Bearer {token_b}"})
+        self.assertEqual(res_access_b.status_code, 403)
+
+    def test_31_phase1_security_jwt_secret_startup_refusal_and_bcrypt(self):
+        """Phase 1: Refuse startup when JWT_SECRET is default and DEBUG is false. Verify bcrypt password hashing."""
+        from config import check_jwt_secret_security, DEFAULT_JWT_SECRET
+        from init_db import hash_password, verify_password
+
+        # 1. Startup refusal check
+        with self.assertRaises(RuntimeError) as ctx:
+            check_jwt_secret_security(debug_mode=False, secret=DEFAULT_JWT_SECRET)
+        self.assertIn("CRITICAL SECURITY CONFIGURATION ERROR", str(ctx.exception))
+
+        # Safe custom secret in production must pass without error
+        check_jwt_secret_security(debug_mode=False, secret="strong_custom_production_secret_key_ph_2026")
+
+        # 2. Verify bcrypt password hashing
+        test_pass = "P@ssw0rd_Philippines_2026!"
+        pwd_hash = hash_password(test_pass)
+        self.assertTrue(pwd_hash.startswith("$2"), f"Hash must be a bcrypt hash ($2b$): {pwd_hash[:10]}")
+        self.assertTrue(verify_password(test_pass, pwd_hash))
+        self.assertFalse(verify_password("WrongPassword123!", pwd_hash))
 
 
 if __name__ == "__main__":
