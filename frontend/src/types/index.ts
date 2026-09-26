@@ -100,3 +100,77 @@ export interface ApiStandardError {
   code?: string;
   status_code?: number;
 }
+
+export interface HealthResponse {
+  status: string;
+  engine: string;
+  database: string;
+  version?: string;
+}
+
+export interface LoginResponse {
+  token: string;
+  user: UserSession;
+}
+
+export interface SampleResponse {
+  id: string;
+  filename: string;
+  original_data_uri: string;
+  enhanced_data_uri: string;
+  crop_8r_data_uri?: string;
+  crop_2x2_data_uri?: string;
+  studio_credits?: number;
+  analysis?: PhotoAnalysis;
+  dimensions?: { width: number; height: number };
+}
+
+export interface ProcessedPhotoResponse {
+  id: string;
+  original_data_uri?: string;
+  enhanced_data_uri: string;
+  crop_8r_data_uri?: string;
+  crop_2x2_data_uri?: string;
+  studio_credits?: number;
+  analysis?: PhotoAnalysis;
+  latency_ms?: number;
+}
+
+export interface BatchUploadResponse {
+  uploaded_count: number;
+  items: PhotoItem[];
+}
+
+export interface BatchProcessResponse {
+  total_processed: number;
+  per_photo_latency_ms: number;
+  studio_credits?: number;
+  items: PhotoItem[];
+}
+
+export interface CheckoutResponse {
+  checkout_url: string;
+  session_id: string;
+}
+
+export interface JobStatusResponse {
+  job_id: string;
+  status: 'queued' | 'processing' | 'done' | 'failed';
+  progress: number;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface AiConfigResponse {
+  gemini_model: string;
+  is_key_configured: boolean;
+  active_engine: string;
+}
+
+export interface AiKeyTestResponse {
+  status: 'success' | 'error';
+  message: string;
+  latency_ms?: number;
+  detail?: string;
+}
+

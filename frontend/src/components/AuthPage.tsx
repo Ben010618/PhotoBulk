@@ -11,6 +11,7 @@ import {
   Info
 } from 'lucide-react';
 import { PageView, UserSession } from './Navbar';
+import { apiClient } from '../api/apiClient';
 
 interface AuthPageProps {
   onNavigate: (page: PageView) => void;
@@ -43,30 +44,17 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onNavigate, onLoginSuccess, 
       formData.append('email', email.trim());
       formData.append('password', password);
 
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        if (data.token) {
-          localStorage.setItem('kameraph_token', data.token);
-        }
-        const session: UserSession = {
-          name: data.user.full_name || (data.user.role === 'super_admin' ? 'KameraPh Administrator' : name),
-          email: data.user.email,
-          role: data.user.role === 'super_admin' ? 'admin' : 'photographer',
-          studioName: data.studio?.studio_name || studioName,
-          credits: data.studio?.credit_balance ?? 150,
-        };
-        onLoginSuccess(session);
-        onNavigate(data.user.role === 'super_admin' ? 'admin_dashboard' : 'user_dashboard');
-        return;
-      } else {
-        const errData = await response.json().catch(() => ({ detail: 'Authentication failed' }));
-        setError(errData.detail || 'Invalid email or password.');
-      }
+      const data = await apiClient.login(formData);
+      const session: UserSession = {
+        name: data.user.name || (data.user.role === 'admin' ? 'KameraPh Administrator' : name),
+        email: data.user.email,
+        role: data.user.role === 'admin' ? 'admin' : 'photographer',
+        studioName: data.user.studioName || studioName,
+        credits: data.user.credits ?? 150,
+      };
+      onLoginSuccess(session);
+      onNavigate(data.user.role === 'admin' ? 'admin_dashboard' : 'user_dashboard');
+      return;
     } catch {
       // Local fallback during decoupled frontend testing
       if (email.trim().toLowerCase() === 'admin@kameraph.com') {

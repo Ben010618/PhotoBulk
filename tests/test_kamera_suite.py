@@ -301,6 +301,54 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertEqual(res.headers["content-type"], "image/jpeg")
         self.assertGreater(len(res.content), 500)
 
+    def test_13_safe_file_io_and_nested_directory_creation(self):
+        """Task 1C: Verifies pdf_engine and analyzer_engine handle non-existent directories and files safely."""
+        from pathlib import Path
+        from analyzer_engine import analyze_portrait, load_portrait_image_safely
+        import tempfile
+        import shutil
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # 1. Test auto-creation of deeply nested output directories
+            deep_nested_path = Path(temp_dir) / "sub1" / "sub2" / "sub3" / "test_gang.pdf"
+            self.assertFalse(deep_nested_path.parent.exists())
+
+            # Create synthetic test file
+            synth_p = Path(temp_dir) / "synth.jpg"
+            cv2.imwrite(str(synth_p), self.test_img)
+
+            # Should automatically create parents and write without FileNotFoundError
+            pdf_bytes = generate_lab_gang_sheet_pdf(
+                master_image_path=str(synth_p),
+                crop_8r_path=str(synth_p),
+                crop_2x2_path=str(synth_p),
+                output_path=deep_nested_path
+            )
+            self.assertTrue(deep_nested_path.is_file())
+            self.assertGreater(deep_nested_path.stat().st_size, 1000)
+
+            # 2. Test analyze_portrait safe handling of missing file path
+            missing_file = Path(temp_dir) / "non_existent.jpg"
+            analysis_result = analyze_portrait(missing_file)
+            self.assertIsInstance(analysis_result, dict)
+            self.assertTrue(analysis_result["review_needed"])
+            self.assertIn("Failed to load image", analysis_result["review_reason"])
+
+            # 3. Test explicit FileNotFoundError in load_portrait_image_safely
+            with self.assertRaises(FileNotFoundError):
+                load_portrait_image_safely(missing_file)
+
+            # 4. Test contact sheet generation with missing image paths
+            photos_with_missing = [
+                {"name": "Missing1", "image_path": str(missing_file)},
+                {"name": "Valid1", "image_path": str(synth_p)}
+            ]
+            nested_contact = Path(temp_dir) / "reports" / "contact_sheet.pdf"
+            contact_bytes = generate_contact_sheet_pdf(photos_with_missing, output_path=nested_contact)
+            self.assertTrue(nested_contact.is_file())
+            self.assertGreater(len(contact_bytes), 1000)
+
 
 if __name__ == "__main__":
     unittest.main()
+

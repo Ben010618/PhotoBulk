@@ -26,6 +26,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { PageView, UserSession } from './Navbar';
+import { apiClient } from '../api/apiClient';
 
 interface AdminDashboardProps {
   onNavigate: (page: PageView) => void;
@@ -78,19 +79,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate, curr
 
   const fetchAiConfig = async () => {
     try {
-      const res = await fetch('/api/admin/ai-config');
-      if (res.ok) {
-        const data = await res.json();
-        setHasKey(data.has_key);
-        setApiKeyMasked(data.api_key_masked);
-        setProvider(data.provider || 'google_gemini');
-        setModel(data.model || 'gemini-2.5-flash');
-        setBeautifyMode(data.beautify_mode || 'ai_neural_frequency');
-        setAiStatus(data.status || 'local_fallback');
-        setEngineLabel(data.engine_label || 'Local OpenCV DNN Hybrid Active');
-        setLastTested(data.last_tested);
-      }
-    } catch (e) {
+      const res = await apiClient.instance.get('/api/admin/ai-config');
+      const data = res.data;
+      setHasKey(data.has_key);
+      setApiKeyMasked(data.api_key_masked);
+      setProvider(data.provider || 'google_gemini');
+      setModel(data.model || 'gemini-2.5-flash');
+      setBeautifyMode(data.beautify_mode || 'ai_neural_frequency');
+      setAiStatus(data.status || 'local_fallback');
+      setEngineLabel(data.engine_label || 'Local OpenCV DNN Hybrid Active');
+      setLastTested(data.last_tested);
+    } catch (e: unknown) {
       console.error('Failed to load AI config:', e);
     }
   };
@@ -106,22 +105,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate, curr
       formData.append('model', model);
       formData.append('beautify_mode', beautifyMode);
 
-      const res = await fetch('/api/admin/ai-config', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setSaveSuccess('AI Engine and API Key configuration saved successfully!');
-        setHasKey(data.has_key);
-        setApiKeyMasked(data.api_key_masked);
-        setAiStatus(data.status);
-        setEngineLabel(data.status === 'active' ? 'Google Gemini Multimodal AI (Active)' : 'Local OpenCV DNN Hybrid (Active)');
-        setApiKey('');
-      }
-    } catch (e) {
-      console.error(e);
+      const res = await apiClient.instance.post('/api/admin/ai-config', formData);
+      const data = res.data;
+      setSaveSuccess('AI Engine and API Key configuration saved successfully!');
+      setHasKey(data.has_key);
+      setApiKeyMasked(data.api_key_masked);
+      setAiStatus(data.status);
+      setEngineLabel(data.status === 'active' ? 'Google Gemini Multimodal AI (Active)' : 'Local OpenCV DNN Hybrid (Active)');
+      setApiKey('');
+    } catch (e: unknown) {
+      console.error('[AdminDashboard.saveAiConfig] Error:', e);
     } finally {
       setIsSaving(false);
     }
@@ -134,12 +127,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate, curr
       const formData = new FormData();
       formData.append('api_key', apiKey);
 
-      const res = await fetch('/api/admin/test-ai-key', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const data = await res.json();
+      const res = await apiClient.instance.post('/api/admin/test-ai-key', formData);
+      const data = res.data;
       setTestResult({
         success: data.success,
         message: data.message,
@@ -148,7 +137,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate, curr
         setAiStatus('active');
         setLastTested(new Date().toLocaleTimeString());
       }
-    } catch (e) {
+    } catch (e: unknown) {
       setTestResult({
         success: false,
         message: 'Network request error while testing AI API Key.',
