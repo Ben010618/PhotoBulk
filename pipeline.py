@@ -19,8 +19,9 @@ from pydantic import BaseModel, Field
 
 from analyzer_engine import analyze_portrait, get_face_detector, load_portrait_image_safely
 from beautification_presets import apply_beauty_preset_to_image, BEAUTY_PRESETS
-from background_engine import generate_studio_backdrop, composite_subject_onto_backdrop, STUDIO_BACKDROPS
+from background_engine import generate_studio_backdrop, composite_subject_onto_backdrop, STUDIO_BACKDROPS, clean_original_backdrop
 from regalia_profiles import REGALIA_PROFILES
+import config
 
 PROOF_BASE_URL = os.environ.get("PROOF_BASE_URL", "http://127.0.0.1:8000/proof")
 
@@ -135,24 +136,38 @@ class ProcessedImageResult(BaseModel):
 
 
 _REMBG_SESSION = None
+_REMBG_SESSION_NAME = None
 
-def get_rembg_session():
-    """Initializes or returns cached rembg U2Net session."""
-    global _REMBG_SESSION
-    if _REMBG_SESSION is None:
+def get_rembg_session(model_name: Optional[str] = None):
+    """Initializes or returns cached rembg session, trying specified model or config.REMBG_MODEL, with fallback to u2net."""
+    global _REMBG_SESSION, _REMBG_SESSION_NAME
+    target_model = model_name or getattr(config, "REMBG_MODEL", "u2net")
+    if _REMBG_SESSION is not None and _REMBG_SESSION_NAME == target_model and _REMBG_SESSION is not False:
+        return _REMBG_SESSION
+
+    try:
+        import rembg
         try:
-            import rembg
-            _REMBG_SESSION = rembg.new_session("u2net")
+            _REMBG_SESSION = rembg.new_session(target_model)
+            _REMBG_SESSION_NAME = target_model
+            return _REMBG_SESSION
         except Exception as e:
-            print("Notice: rembg session initialization fallback:", e)
-            _REMBG_SESSION = False
+            print(f"Notice: Failed to load rembg session '{target_model}': {e}. Falling back to 'u2net'...")
+            _REMBG_SESSION = rembg.new_session("u2net")
+            _REMBG_SESSION_NAME = "u2net"
+            return _REMBG_SESSION
+    except Exception as e:
+        print("Notice: rembg session initialization fallback:", e)
+        _REMBG_SESSION = False
+        _REMBG_SESSION_NAME = None
     return _REMBG_SESSION
 
 
 def get_subject_mask(img_bgr: np.ndarray, face_info: Optional[Dict[str, Any]] = None) -> np.ndarray:
     """
     Computes a neural segmentation mask preserving academic togas, UP sablays,
-    tassels, and caps. Uses rembg U2Net with high-precision GrabCut fallback.
+    tassels, and caps with a fractional soft alpha matte.
+    Uses rembg (u2net / birefnet-portrait) with adaptive feathered GrabCut fallback.
     """
     h, w = img_bgr.shape[:2]
     session = get_rembg_session()
@@ -166,13 +181,10 @@ def get_subject_mask(img_bgr: np.ndarray, face_info: Optional[Dict[str, Any]] = 
             mask_out = rembg.remove(pil_img, session=session, only_mask=True)
             mask_np = np.array(mask_out)
             
-            # Post-process mask: clean binary threshold and edge feathering
-            _, binary_mask = cv2.threshold(mask_np, 128, 255, cv2.THRESH_BINARY)
-            
-            # Preserve regalia edges: slight closing to prevent holes in dark black togas
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            refined = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-            return refined
+            # Preserve soft alpha transitions: do NOT threshold to pure binary 0/255.
+            # Clean up residual background noise (< 4) while preserving hair/tassel gradients:
+            cleaned_mask = np.where(mask_np < 4, 0, mask_np)
+            return cleaned_mask.astype(np.uint8)
         except Exception as e:
             print("rembg execution error, falling back to GrabCut:", e)
 
@@ -198,7 +210,13 @@ def get_subject_mask(img_bgr: np.ndarray, face_info: Optional[Dict[str, Any]] = 
         cv2.grabCut(img_bgr, mask, rect, bgd_model, fgd_model, 2, cv2.GC_INIT_WITH_RECT)
         output_mask = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype('uint8')
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        return cv2.morphologyEx(output_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        closed = cv2.morphologyEx(output_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        # Soften edges slightly so fallback also provides fractional transitions
+        feathered = cv2.GaussianBlur(closed, (7, 7), 1.5)
+        edge_zone = cv2.Canny(closed, 100, 200)
+        edge_dilated = cv2.dilate(edge_zone, np.ones((5, 5), np.uint8), iterations=1)
+        soft_fallback = np.where(edge_dilated > 0, feathered, closed)
+        return soft_fallback.astype(np.uint8)
     except Exception:
         # Ultimate safe foreground fallback
         safe_mask = np.full((h, w), 255, dtype=np.uint8)
@@ -310,13 +328,14 @@ def process_complete_workflow(
     studio_light_intensity: float = 0.20,
     rim_light_boost: float = 0.20,
     iron_strength: float = 0.70,
-    analysis_data: Optional[Dict[str, Any]] = None
+    analysis_data: Optional[Dict[str, Any]] = None,
+    backdrop_mode: Optional[str] = None
 ) -> Tuple[np.ndarray, int, Optional[Dict[str, Any]], str]:
     """
     Executes the full graduation photo processing workflow:
       1. Regalia-specific parameter adjustment
       2. Neural subject matting (rembg)
-      3. Studio backdrop compositing
+      3. Studio backdrop compositing (replace, clean original, or keep)
       4. Skin retouching, blemish healing, melanin radiance, catchlights
       5. Real elapsed latency and hardware engine reporting
     """
@@ -347,12 +366,15 @@ def process_complete_workflow(
         if not analysis.get("review_reason"):
             analysis["review_reason"] = "No clear face detected in portrait. Requires manual review."
 
-    # 2. High-Fidelity Subject Segmentation
+    # 2. High-Fidelity Subject Segmentation (fractional soft alpha)
     subject_mask = get_subject_mask(img_bgr, face_info)
 
-    # 3. Studio Backdrop Compositing
-    if bg_replacement_enabled:
-        backdrop = generate_studio_backdrop(w, h, backdrop_type=backdrop_type)
+    # 3. Studio Backdrop Handling ('replace', 'clean', or 'keep')
+    mode = backdrop_mode or ("replace" if bg_replacement_enabled else "keep")
+    if mode == "clean":
+        subject_isolated = clean_original_backdrop(img_bgr, subject_mask)
+    elif mode == "replace":
+        backdrop = generate_studio_backdrop(w, h, backdrop_type=backdrop_type, face_info=face_info)
         subject_isolated = composite_subject_onto_backdrop(img_bgr, subject_mask, backdrop)
     else:
         subject_isolated = img_bgr.copy()

@@ -23,6 +23,7 @@ import tempfile
 import io
 import zipfile
 from fastapi.testclient import TestClient
+from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
@@ -698,6 +699,55 @@ class TestKameraPhSuite(unittest.TestCase):
             import shutil
             shutil.rmtree(str(project_store.get_project_dir(proj_id)), ignore_errors=True)
             BATCH_STORE.pop(photo_id, None)
+
+    def test_20_soft_alpha_matte_and_backdrop_modes(self):
+        """STEP 3: Verify soft alpha matte retains fractional edge values and test backdrop modes."""
+        from background_engine import clean_original_backdrop, generate_studio_backdrop, composite_subject_onto_backdrop, STUDIO_BACKDROPS
+        
+        face_path = Path(__file__).parent / "fixtures" / "sample_grad_face.jpg"
+        if not face_path.exists():
+            self.skipTest("sample_grad_face.jpg fixture not found")
+        img = cv2.imread(str(face_path))
+        
+        # Get neural subject mask
+        mask = get_subject_mask(img)
+        self.assertEqual(mask.shape[:2], img.shape[:2])
+        self.assertEqual(mask.dtype, np.uint8)
+        
+        # Verify fractional alpha values exist (not only 0 and 255)
+        fractional_count = int(np.count_nonzero((mask > 5) & (mask < 250)))
+        self.assertGreater(fractional_count, 500, "Alpha matte must be soft/fractional along hair and edges, not hard thresholded 0/255!")
+        
+        # Verify all clean backdrops generate correctly
+        for bg_id in ["classic_blue", "deep_navy", "neutral_grey", "studio_white", "warm_brown"]:
+            bg = generate_studio_backdrop(400, 500, backdrop_type=bg_id)
+            self.assertEqual(bg.shape, (500, 400, 3))
+            self.assertEqual(bg.dtype, np.uint8)
+            
+        # Verify clean_original_backdrop mode
+        cleaned = clean_original_backdrop(img, mask)
+        self.assertEqual(cleaned.shape, img.shape)
+        self.assertEqual(cleaned.dtype, np.uint8)
+
+    def test_21_edge_decontamination_and_face_spotlight(self):
+        """STEP 4: Verify face-positioned spotlight and edge color decontamination."""
+        from background_engine import decontaminate_edges, generate_studio_backdrop
+        
+        # Test spotlight positioning
+        face_info = {"bbox": [200, 150, 100, 120]}
+        bg_centered = generate_studio_backdrop(500, 600, backdrop_type="classic_blue", face_info=face_info)
+        
+        # Pixel right behind head (x=250, y=198) should be brighter than outer corner (x=10, y=10)
+        spot_lum = float(np.mean(bg_centered[198, 250]))
+        corner_lum = float(np.mean(bg_centered[10, 10]))
+        self.assertGreater(spot_lum, corner_lum, "Strobe light spot must be positioned behind detected face!")
+        
+        # Test edge decontamination
+        dummy_img = np.full((100, 100, 3), 200, dtype=np.uint8)
+        dummy_mask = np.full((100, 100), 128, dtype=np.uint8)
+        decontaminated = decontaminate_edges(dummy_img, dummy_mask)
+        self.assertEqual(decontaminated.shape, dummy_img.shape)
+        self.assertEqual(decontaminated.dtype, np.uint8)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,8 @@ BASE_DIR = Path(__file__).resolve().parent
 PAYMENTS_ENABLED = os.environ.get("PAYMENTS_ENABLED", "false").lower() in ("true", "1", "yes")
 
 # AI / Neural Model Preferences
-REMBG_MODEL = os.environ.get("REMBG_MODEL", "birefnet-portrait")  # 'birefnet-portrait' or 'u2net'
+# u2net (0.44s on CPU) is default for laptop speed; birefnet-portrait is supported via env var
+REMBG_MODEL = os.environ.get("REMBG_MODEL", "u2net")
 BACKGROUND_REPLACEMENT_MODE = os.environ.get("BACKGROUND_REPLACEMENT_MODE", "replace")  # 'replace', 'clean', 'keep'
 
 # =========================================================================

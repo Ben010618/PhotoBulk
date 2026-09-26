@@ -130,9 +130,9 @@ def run_demo(input_dir: Path, output_dir: Path, max_photos: int = 10, preset: st
         t_matting = time.time() - t0
         print(f"  Matting:  Subject mask generated ({t_matting:.3f} s)")
 
-        # 3. Backdrop Compositing
+        # 3. Backdrop Compositing (Face-positioned strobe light spot)
         t0 = time.time()
-        backdrop = generate_studio_backdrop(w, h, backdrop_type="royal_navy")
+        backdrop = generate_studio_backdrop(w, h, backdrop_type="classic_blue", face_info=face_info)
         subject_isolated = composite_subject_onto_backdrop(img_bgr, subject_mask, backdrop)
         t_backdrop = time.time() - t0
 

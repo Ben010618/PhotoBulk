@@ -30,7 +30,7 @@ import numpy as np
 from config import DATA_DIR, PROJECTS_DIR
 from analyzer_engine import analyze_portrait
 from pipeline import get_subject_mask, crop_8r_aspect, crop_2x2_id
-from background_engine import generate_studio_backdrop, composite_subject_onto_backdrop
+from background_engine import generate_studio_backdrop, composite_subject_onto_backdrop, clean_original_backdrop
 from beautification_presets import apply_beauty_preset_to_image, apply_studio_environment_lighting
 
 logger = logging.getLogger("kameraph.project_store")
@@ -237,9 +237,13 @@ class ProjectStore:
 
         # 1. Backdrop Compositing
         bg_replacement = active_settings.get("bg_replacement_enabled", True)
-        backdrop_type = active_settings.get("backdrop_type", "royal_navy")
-        if bg_replacement:
-            backdrop = generate_studio_backdrop(pw, ph, backdrop_type=backdrop_type)
+        backdrop_mode = active_settings.get("backdrop_mode", "replace" if bg_replacement else "keep")
+        backdrop_type = active_settings.get("backdrop_type", "classic_blue")
+
+        if backdrop_mode == "clean":
+            subject_isolated = clean_original_backdrop(preview_bgr, alpha_preview)
+        elif backdrop_mode == "replace":
+            backdrop = generate_studio_backdrop(pw, ph, backdrop_type=backdrop_type, face_info=preview_face_info)
             subject_isolated = composite_subject_onto_backdrop(preview_bgr, alpha_preview, backdrop)
         else:
             subject_isolated = preview_bgr.copy()
@@ -316,9 +320,13 @@ class ProjectStore:
 
         # 1. Studio Backdrop Compositing
         bg_replacement = active_settings.get("bg_replacement_enabled", True)
-        backdrop_type = active_settings.get("backdrop_type", "royal_navy")
-        if bg_replacement:
-            backdrop = generate_studio_backdrop(w, h, backdrop_type=backdrop_type)
+        backdrop_mode = active_settings.get("backdrop_mode", "replace" if bg_replacement else "keep")
+        backdrop_type = active_settings.get("backdrop_type", "classic_blue")
+
+        if backdrop_mode == "clean":
+            subject_isolated = clean_original_backdrop(img_bgr, alpha_mask)
+        elif backdrop_mode == "replace":
+            backdrop = generate_studio_backdrop(w, h, backdrop_type=backdrop_type, face_info=face_info)
             subject_isolated = composite_subject_onto_backdrop(img_bgr, alpha_mask, backdrop)
         else:
             subject_isolated = img_bgr.copy()
