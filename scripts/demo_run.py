@@ -69,7 +69,7 @@ def create_comparison_image(original_bgr: np.ndarray, alpha_matte: np.ndarray, r
     return np.hstack([p1, divider, p2, divider, p3])
 
 
-def run_demo(input_dir: Path, output_dir: Path, max_photos: int = 10, preset: str = "morena_radiant"):
+def run_demo(input_dir: Path, output_dir: Path, max_photos: int = 10, preset: str = "natural"):
     output_dir.mkdir(parents=True, exist_ok=True)
     engine_name = detect_actual_engine()
 
@@ -144,12 +144,15 @@ def run_demo(input_dir: Path, output_dir: Path, max_photos: int = 10, preset: st
                 face_info=face_info,
                 preset_id=preset,
                 custom_adjustments={
-                    "skin_smoothing": 0.65,
-                    "blemish_cut": 0.70,
-                    "glow_intensity": 0.35,
-                    "eye_catchlight": 0.35,
+                    "skin_smoothing": 0.45,
+                    "blemish_cut": 0.50,
+                    "spot_correction": 0.35,
+                    "loose_hair_cleanup": 0.30,
+                    "cleanup_loose_hair": True,
+                    "glow_intensity": 0.15,
+                    "eye_catchlight": 0.15,
                     "lighting_temp": "neutral_5500k",
-                    "studio_light_intensity": 0.20
+                    "studio_light_intensity": 0.15
                 }
             )
         else:
@@ -244,7 +247,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", "-i", type=str, default="local_storage", help="Input folder with portrait images")
     parser.add_argument("--output", "-o", type=str, default="demo_output", help="Output directory for results")
     parser.add_argument("--max", "-m", type=int, default=5, help="Maximum photos to process")
-    parser.add_argument("--preset", "-p", type=str, default="morena_radiant", help="Beauty preset id")
+    parser.add_argument("--preset", "-p", type=str, default="natural", help="Beauty preset id")
     args = parser.parse_args()
 
     in_path = Path(args.input)

@@ -13,7 +13,9 @@ import {
   ApiStandardError,
   BatchProcessResponse,
   BatchUploadResponse,
+  BulkExportRequest,
   CheckoutResponse,
+  ExportJobStatus,
   HealthResponse,
   JobStatusResponse,
   LoginResponse,
@@ -21,10 +23,10 @@ import {
   PresignedDownloadResponse,
   PresignedUploadResponse,
   ProcessedPhotoResponse,
+  ProjectItem,
   RegaliaProfile,
   RegisterPhotoRequest,
   RegisterPhotoResponse,
-  SampleResponse,
   UserSession,
 } from '../types';
 
@@ -171,20 +173,7 @@ export const apiClient = {
     }
   },
 
-  /**
-   * Sample Portrait Retrieval
-   */
-  async getSample(params: Record<string, string | number | boolean>): Promise<SampleResponse> {
-    try {
-      const query = new URLSearchParams();
-      Object.entries(params).forEach(([k, v]) => query.append(k, String(v)));
-      const res = await axiosInstance.get<SampleResponse>(`/api/sample?${query.toString()}`);
-      return res.data;
-    } catch (err: unknown) {
-      console.error('[apiClient.getSample] Error fetching sample portrait:', err);
-      throw err;
-    }
-  },
+
 
   /**
    * Single Photo Processing
@@ -311,27 +300,29 @@ export const apiClient = {
     }
   },
 
-  /**
-   * Batch Operations (with direct edge upload and standard multipart fallback)
-   */
-  async batchUpload(files: File[]): Promise<BatchUploadResponse> {
+  async batchUpload(
+    files: File[],
+    projectId: string = 'default_project',
+    onProgress?: (progressPct: number) => void
+  ): Promise<BatchUploadResponse> {
     try {
-      // First attempt zero-egress, non-blocking direct edge upload
-      return await this.batchUploadDirect(files);
-    } catch (edgeErr: unknown) {
-      console.warn('[apiClient.batchUpload] Direct edge upload encountered error, falling back to standard multipart batch upload:', edgeErr);
-      try {
-        const formData = new FormData();
-        files.forEach((file) => formData.append('files', file));
+      const formData = new FormData();
+      files.forEach((file) => formData.append('files', file));
+      formData.append('project_id', projectId);
 
-        const res = await axiosInstance.post<BatchUploadResponse>('/api/batch-upload', formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        });
-        return res.data;
-      } catch (err: unknown) {
-        console.error('[apiClient.batchUpload] Standard batch upload fallback also failed:', err);
-        throw err;
-      }
+      const res = await axiosInstance.post<BatchUploadResponse>('/api/batch-upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (progressEvent) => {
+          if (onProgress && progressEvent.total) {
+            const pct = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            onProgress(pct);
+          }
+        },
+      });
+      return res.data;
+    } catch (err: unknown) {
+      console.error('[apiClient.batchUpload] Batch upload failed:', err);
+      throw err;
     }
   },
 
@@ -465,6 +456,145 @@ export const apiClient = {
       return res.data;
     } catch (err: unknown) {
       console.error('[apiClient.testAiKey] AI key probe failed:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Project & Bulk Workflow Operations
+   */
+  async listProjects(): Promise<{ projects: ProjectItem[] }> {
+    try {
+      const res = await axiosInstance.get<{ projects: ProjectItem[] }>('/api/projects');
+      return res.data;
+    } catch (err: unknown) {
+      console.error('[apiClient.listProjects] Error fetching projects:', err);
+      throw err;
+    }
+  },
+
+  async createProject(title: string, projectId?: string): Promise<ProjectItem> {
+    try {
+      const res = await axiosInstance.post<ProjectItem>('/api/projects', {
+        title,
+        project_id: projectId,
+      });
+      return res.data;
+    } catch (err: unknown) {
+      console.error('[apiClient.createProject] Error creating project:', err);
+      throw err;
+    }
+  },
+
+  async getProject(projectId: string): Promise<{ project: ProjectItem; photos: any[]; total_photos: number }> {
+    try {
+      const res = await axiosInstance.get(`/api/projects/${projectId}`);
+      return res.data;
+    } catch (err: unknown) {
+      console.error(`[apiClient.getProject] Error fetching project ${projectId}:`, err);
+      throw err;
+    }
+  },
+
+  async getProjectPhotos(projectId: string): Promise<{ photos: any[]; total: number }> {
+    try {
+      const res = await axiosInstance.get<{ photos: any[]; total: number }>(`/api/projects/${projectId}/photos`);
+      return res.data;
+    } catch (err: unknown) {
+      console.error(`[apiClient.getProjectPhotos] Error listing photos for ${projectId}:`, err);
+      throw err;
+    }
+  },
+
+  async updatePhotoSettings(
+    projectId: string,
+    photoId: string,
+    settings: Record<string, any>,
+    isUserOverride: boolean = true
+  ): Promise<{ success: boolean; settings: Record<string, any>; render_latency_ms: number }> {
+    try {
+      const res = await axiosInstance.post(`/api/projects/${projectId}/photos/${photoId}/settings`, {
+        settings,
+        is_user_override: isUserOverride,
+      });
+      return res.data;
+    } catch (err: unknown) {
+      console.error(`[apiClient.updatePhotoSettings] Error updating settings for ${photoId}:`, err);
+      throw err;
+    }
+  },
+
+  async clearPhotoOverride(projectId: string, photoId: string): Promise<{ success: boolean; settings: Record<string, any> }> {
+    try {
+      const res = await axiosInstance.post(`/api/projects/${projectId}/photos/${photoId}/clear-override`);
+      return res.data;
+    } catch (err: unknown) {
+      console.error(`[apiClient.clearPhotoOverride] Error clearing override for ${photoId}:`, err);
+      throw err;
+    }
+  },
+
+  async applyToAll(
+    projectId: string,
+    sourcePhotoId: string,
+    excludeOverridden: boolean = true
+  ): Promise<{
+    success: boolean;
+    project_id: string;
+    source_photo_id: string;
+    updated_count: number;
+    skipped_count: number;
+  }> {
+    try {
+      const res = await axiosInstance.post(
+        `/api/projects/${projectId}/photos/${sourcePhotoId}/apply-to-all?exclude_overridden=${excludeOverridden}`
+      );
+      return res.data;
+    } catch (err: unknown) {
+      console.error(`[apiClient.applyToAll] Error applying look across ${projectId}:`, err);
+      throw err;
+    }
+  },
+
+  async triggerProjectExport(
+    projectId: string,
+    req: BulkExportRequest
+  ): Promise<{ job_id: string; status: string; message: string }> {
+    try {
+      const res = await axiosInstance.post(`/api/projects/${projectId}/export`, req);
+      return res.data;
+    } catch (err: unknown) {
+      console.error(`[apiClient.triggerProjectExport] Error starting export for ${projectId}:`, err);
+      throw err;
+    }
+  },
+
+  async getExportStatus(projectId: string, exportId: string): Promise<ExportJobStatus> {
+    try {
+      const res = await axiosInstance.get<ExportJobStatus>(`/api/projects/${projectId}/exports/${exportId}/status`);
+      return res.data;
+    } catch (err: unknown) {
+      console.error(`[apiClient.getExportStatus] Error fetching export status ${exportId}:`, err);
+      throw err;
+    }
+  },
+
+  async downloadExportZip(projectId: string, exportId: string, filename: string = 'export.zip'): Promise<void> {
+    try {
+      const res = await axiosInstance.get(`/api/projects/${projectId}/exports/${exportId}/download`, {
+        responseType: 'blob',
+      });
+      const blob = new Blob([res.data], { type: 'application/zip' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: unknown) {
+      console.error(`[apiClient.downloadExportZip] Error downloading zip:`, err);
       throw err;
     }
   },

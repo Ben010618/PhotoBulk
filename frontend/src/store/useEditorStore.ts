@@ -1,7 +1,17 @@
 import { create } from 'zustand';
 import { PhotoItem } from '../types';
 
+export type WorkflowStep = 'projects' | 'upload' | 'review' | 'editor' | 'export';
+
 interface EditorState {
+  // Project & Workflow State
+  currentProjectId: string;
+  currentProjectTitle: string;
+  workflowStep: WorkflowStep;
+  setCurrentProjectId: (id: string) => void;
+  setCurrentProjectTitle: (title: string) => void;
+  setWorkflowStep: (step: WorkflowStep) => void;
+
   // Photos Queue
   photos: PhotoItem[];
   activePhotoId: string;
@@ -19,14 +29,18 @@ interface EditorState {
   setRegaliaProfile: (profile: string) => void;
   setBeautyPreset: (preset: string) => void;
 
-  // Sliders
+  // Sliders (Accurate Step 6 & 9 Naming)
   skinSmoothing: number;
   blemishRemoval: number;
-  darkSpotWhitening: number;
+  spotCorrection: number;
+  darkSpotWhitening: number; // backward-compat alias
   shineCut: number;
   glowIntensity: number;
-  catchlightBoost: number;
+  eyeCatchlight: number;
+  catchlightBoost: number; // backward-compat alias
   teethWhitening: number;
+  looseHairCleanup: boolean;
+  looseHairStrength: number;
   lipColor: string;
   lipIntensity: number;
   lightingTemp: 'warm_3200k' | 'neutral_5500k' | 'cool_6500k';
@@ -36,11 +50,15 @@ interface EditorState {
 
   setSkinSmoothing: (v: number) => void;
   setBlemishRemoval: (v: number) => void;
+  setSpotCorrection: (v: number) => void;
   setDarkSpotWhitening: (v: number) => void;
   setShineCut: (v: number) => void;
   setGlowIntensity: (v: number) => void;
+  setEyeCatchlight: (v: number) => void;
   setCatchlightBoost: (v: number) => void;
   setTeethWhitening: (v: number) => void;
+  setLooseHairCleanup: (enabled: boolean) => void;
+  setLooseHairStrength: (v: number) => void;
   setLipColor: (c: string) => void;
   setLipIntensity: (v: number) => void;
   setLightingTemp: (t: 'warm_3200k' | 'neutral_5500k' | 'cool_6500k') => void;
@@ -67,6 +85,13 @@ interface EditorState {
 }
 
 export const useEditorStore = create<EditorState>((set) => ({
+  currentProjectId: 'default_project',
+  currentProjectTitle: 'Graduation Cohort 2026',
+  workflowStep: 'projects',
+  setCurrentProjectId: (id) => set({ currentProjectId: id }),
+  setCurrentProjectTitle: (title) => set({ currentProjectTitle: title }),
+  setWorkflowStep: (step) => set({ workflowStep: step }),
+
   photos: [],
   activePhotoId: '',
   setPhotos: (photos) =>
@@ -80,36 +105,44 @@ export const useEditorStore = create<EditorState>((set) => ({
     })),
 
   bgReplacementEnabled: true,
-  backdropType: 'royal_navy',
+  backdropType: 'classic_blue',
   regaliaProfile: 'ph_academic_toga',
-  beautyPreset: 'morena_radiant',
+  beautyPreset: 'natural',
 
   setBgReplacementEnabled: (enabled) => set({ bgReplacementEnabled: enabled }),
   setBackdropType: (type) => set({ backdropType: type }),
   setRegaliaProfile: (profile) => set({ regaliaProfile: profile }),
   setBeautyPreset: (preset) => set({ beautyPreset: preset }),
 
-  skinSmoothing: 65,
-  blemishRemoval: 70,
-  darkSpotWhitening: 50,
-  shineCut: 35,
-  glowIntensity: 40,
-  catchlightBoost: 40,
-  teethWhitening: 45,
+  skinSmoothing: 45,
+  blemishRemoval: 50,
+  spotCorrection: 35,
+  darkSpotWhitening: 35,
+  shineCut: 25,
+  glowIntensity: 15,
+  eyeCatchlight: 25,
+  catchlightBoost: 25,
+  teethWhitening: 30,
+  looseHairCleanup: true,
+  looseHairStrength: 30,
   lipColor: '#d87093',
-  lipIntensity: 35,
+  lipIntensity: 0,
   lightingTemp: 'neutral_5500k',
-  studioLightIntensity: 20,
-  rimLightBoost: 20,
-  togaIron: 70,
+  studioLightIntensity: 15,
+  rimLightBoost: 12,
+  togaIron: 60,
 
   setSkinSmoothing: (v) => set({ skinSmoothing: v }),
   setBlemishRemoval: (v) => set({ blemishRemoval: v }),
-  setDarkSpotWhitening: (v) => set({ darkSpotWhitening: v }),
+  setSpotCorrection: (v) => set({ spotCorrection: v, darkSpotWhitening: v }),
+  setDarkSpotWhitening: (v) => set({ spotCorrection: v, darkSpotWhitening: v }),
   setShineCut: (v) => set({ shineCut: v }),
   setGlowIntensity: (v) => set({ glowIntensity: v }),
-  setCatchlightBoost: (v) => set({ catchlightBoost: v }),
+  setEyeCatchlight: (v) => set({ eyeCatchlight: v, catchlightBoost: v }),
+  setCatchlightBoost: (v) => set({ eyeCatchlight: v, catchlightBoost: v }),
   setTeethWhitening: (v) => set({ teethWhitening: v }),
+  setLooseHairCleanup: (enabled) => set({ looseHairCleanup: enabled }),
+  setLooseHairStrength: (v) => set({ looseHairStrength: v }),
   setLipColor: (c) => set({ lipColor: c }),
   setLipIntensity: (v) => set({ lipIntensity: v }),
   setLightingTemp: (t) => set({ lightingTemp: t }),
@@ -120,7 +153,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   printViewMode: 'master',
   sliderPosition: 50,
   isZoomed: false,
-  engineMode: 'modal_cloud_gpu',
+  engineMode: 'local_cpu',
   isProcessing: false,
   isBatchRunning: false,
   batchProgress: 0,

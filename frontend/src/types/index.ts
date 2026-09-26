@@ -29,6 +29,19 @@ export interface PhotoAnalysis {
     pitch_deg?: number;
     yaw_deg?: number;
   };
+  auto_corrections?: {
+    exposure_compensation_ev?: number;
+    target_skin_luminance?: number;
+    current_skin_luminance?: number;
+    scaling_applied?: boolean;
+    texture_scale?: number;
+    spot_scale?: number;
+  };
+  white_balance_cast?: {
+    has_cast?: boolean;
+    cast_type?: string;
+    delta_b?: number;
+  };
 }
 
 export interface PhotoItem {
@@ -42,6 +55,11 @@ export interface PhotoItem {
   masterUrl?: string;
   status: 'pending' | 'processing' | 'ready' | 'done';
   analysis?: PhotoAnalysis;
+  has_face?: boolean;
+  has_user_override?: boolean;
+  review_needed?: boolean;
+  review_reason?: string;
+  settings?: Record<string, any>;
   latency_ms?: number;
   engine_used?: string;
 }
@@ -59,13 +77,50 @@ export interface BeautyPreset {
   description: string;
   skin_smoothing: number;
   blemish_cut: number;
-  dark_spot_whitening: number;
+  spot_correction?: number;
+  dark_spot_whitening?: number;
   shine_reduction: number;
   lip_intensity: number;
-  lip_color: string;
+  lip_color?: string;
   glow_intensity: number;
-  catchlight_boost: number;
+  eye_catchlight?: number;
+  catchlight_boost?: number;
   teeth_whitening: number;
+  loose_hair_cleanup?: number;
+  cleanup_loose_hair?: boolean;
+}
+
+export interface ProjectItem {
+  id: string;
+  title: string;
+  photo_count: number;
+  created_at: number;
+}
+
+export interface BulkExportRequest {
+  selected_outputs: string[];
+  filename_template: string;
+  student_csv?: string;
+  school_name: string;
+  studio_name?: string;
+  include_contact_sheet: boolean;
+}
+
+export interface ExportJobStatus {
+  job_id: string;
+  project_id: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  progress: number;
+  total?: number;
+  processed?: number;
+  message?: string;
+  error?: string;
+  result?: {
+    zip_path: string;
+    zip_size_bytes: number;
+    total_images_rendered: number;
+    latency_ms: number;
+  };
 }
 
 export interface RegaliaProfile {
