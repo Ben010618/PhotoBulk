@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Upload,
   Download,
@@ -13,119 +13,91 @@ import { Navbar } from './components/Navbar';
 import { LandingPage } from './components/LandingPage';
 import { AuthPage } from './components/AuthPage';
 import { UserDashboard } from './components/UserDashboard';
-import { AdminDashboard } from './components/AdminDashboard';
+import { AdminPanel } from './components/AdminPanel/AdminPanel';
+import { StudentPortal } from './components/StudentPortal/StudentPortal';
 import { PhotoComparisonViewer } from './components/PhotoComparisonViewer';
 import { SettingsPanel } from './components/SettingsPanel';
 import { BatchFilmstrip } from './components/BatchFilmstrip';
 import { TopUpModal } from './components/TopUpModal';
+import { ToastContainer } from './components/Common/ToastContainer';
 
 import { api } from './api/client';
+import { useUIStore } from './store/useUIStore';
+import { useAuthStore } from './store/useAuthStore';
+import { useEditorStore } from './store/useEditorStore';
 import {
-  PageView,
-  UserSession,
-  PhotoItem,
   BackdropPreset,
   BeautyPreset,
+  PhotoItem,
   RegaliaProfile,
 } from './types';
 
 export default function App() {
-  // Page Routing & User Session State
-  const [currentPage, setCurrentPage] = useState<PageView>(() => {
-    const hash = window.location.hash.replace('#', '') as PageView;
-    if (['landing', 'auth', 'user_dashboard', 'admin_dashboard', 'editor'].includes(hash)) {
-      return hash;
-    }
-    return 'editor';
-  });
-
-  const [currentUser, setCurrentUser] = useState<UserSession | null>({
-    name: 'Juan Dela Cruz',
-    email: 'editor@auragrad-studio.ph',
-    role: 'photographer',
-    studioName: 'AuraGrad Creative Studio Manila',
-    credits: 150,
-  });
+  // Global Stores (eliminates prop-drilling)
+  const { currentPage, setCurrentPage, isTopUpModalOpen, openTopUpModal, closeTopUpModal, addToast } = useUIStore();
+  const { currentUser, setCurrentUser, setCredits, logout } = useAuthStore();
+  const {
+    photos,
+    setPhotos,
+    activePhotoId,
+    setActivePhotoId,
+    bgReplacementEnabled,
+    setBgReplacementEnabled,
+    backdropType,
+    setBackdropType,
+    regaliaProfile,
+    setRegaliaProfile,
+    beautyPreset,
+    setBeautyPreset,
+    skinSmoothing,
+    setSkinSmoothing,
+    blemishRemoval,
+    setBlemishRemoval,
+    darkSpotWhitening,
+    setDarkSpotWhitening,
+    shineCut,
+    setShineCut,
+    glowIntensity,
+    setGlowIntensity,
+    catchlightBoost,
+    setCatchlightBoost,
+    teethWhitening,
+    setTeethWhitening,
+    lipColor,
+    setLipColor,
+    lipIntensity,
+    setLipIntensity,
+    lightingTemp,
+    setLightingTemp,
+    studioLightIntensity,
+    setStudioLightIntensity,
+    rimLightBoost,
+    setRimLightBoost,
+    togaIron,
+    setTogaIron,
+    printViewMode,
+    setPrintViewMode,
+    sliderPosition,
+    setSliderPosition,
+    isZoomed,
+    setIsZoomed,
+    engineMode,
+    setEngineMode,
+    isProcessing,
+    setIsProcessing,
+    isBatchRunning,
+    setIsBatchRunning,
+    batchProgress,
+    setBatchProgress,
+  } = useEditorStore();
 
   const [authInitialMode, setAuthInitialMode] = useState<'signin' | 'signup'>('signin');
-
-  // Verify server session on initial load
-  useEffect(() => {
-    api.getCurrentUser()
-      .then((user) => {
-        if (user) {
-          setCurrentUser(user);
-          setCredits(user.credits);
-        }
-      })
-      .catch(() => {
-        // Fall back to default local user if offline or unauthenticated
-      });
-  }, []);
-
-  useEffect(() => {
-    const handleHashChange = () => {
-      const hash = window.location.hash.replace('#', '') as PageView;
-      if (['landing', 'auth', 'user_dashboard', 'admin_dashboard', 'editor'].includes(hash)) {
-        setCurrentPage(hash);
-      }
-    };
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
-  }, []);
-
-  const handleNavigate = (page: PageView, authMode?: 'signin' | 'signup') => {
-    if (authMode) {
-      setAuthInitialMode(authMode);
-    }
-    setCurrentPage(page);
-    window.location.hash = page;
-  };
-
-  // Workflow Settings
-  const [bgReplacementEnabled, setBgReplacementEnabled] = useState<boolean>(true);
-  const [backdropType, setBackdropType] = useState<string>('royal_navy');
-  const [regaliaProfile, setRegaliaProfile] = useState<string>('ph_academic_toga');
-  const [beautyPreset, setBeautyPreset] = useState<string>('morena_radiant');
-  const [skinSmoothing, setSkinSmoothing] = useState<number>(65);
-  const [blemishRemoval, setBlemishRemoval] = useState<number>(70);
-  const [darkSpotWhitening, setDarkSpotWhitening] = useState<number>(50);
-  const [shineCut, setShineCut] = useState<number>(35);
-  const [glowIntensity, setGlowIntensity] = useState<number>(40);
-  const [catchlightBoost, setCatchlightBoost] = useState<number>(40);
-  const [teethWhitening, setTeethWhitening] = useState<number>(45);
-
-  const [lipColor, setLipColor] = useState<string>('#d87093');
-  const [lipIntensity, setLipIntensity] = useState<number>(35);
-
-  const [lightingTemp, setLightingTemp] = useState<'warm_3200k' | 'neutral_5500k' | 'cool_6500k'>('neutral_5500k');
-  const [studioLightIntensity, setStudioLightIntensity] = useState<number>(20);
-  const [rimLightBoost, setRimLightBoost] = useState<number>(20);
-  const [togaIron, setTogaIron] = useState<number>(70);
-
-  // Print Mode & Engine
-  const [printViewMode, setPrintViewMode] = useState<'master' | '8r' | '2x2'>('master');
-  const [engineMode, setEngineMode] = useState<'local_cpu' | 'modal_cloud_gpu'>('modal_cloud_gpu');
-  const [credits, setCredits] = useState<number>(150);
-  const [showTopUpModal, setShowTopUpModal] = useState<boolean>(false);
-
-  // Canvas / Viewer States
-  const [sliderPosition, setSliderPosition] = useState<number>(50);
   const [isDragging, setIsDragging] = useState<boolean>(false);
-  const [isZoomed, setIsZoomed] = useState<boolean>(false);
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [batchProgress, setBatchProgress] = useState<number>(0);
-  const [isBatchRunning, setIsBatchRunning] = useState<boolean>(false);
-  const [statusMessage, setStatusMessage] = useState<string>('');
-
-  // Photos State
-  const [photos, setPhotos] = useState<PhotoItem[]>([]);
-  const [activePhotoId, setActivePhotoId] = useState<string>('');
 
   const containerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Presets
+  // Standard Studio Presets
   const backdrops: BackdropPreset[] = [
     {
       id: 'royal_navy',
@@ -263,47 +235,69 @@ export default function App() {
     },
   ];
 
-  // Fetch sample portrait on mount
+  // Verify server session on initial load
   useEffect(() => {
-    fetchSample();
-  }, []);
-
-  const fetchSample = async () => {
-    try {
-      const data = await api.getSample({
-        bg_replacement_enabled: bgReplacementEnabled,
-        backdrop_type: backdropType,
-        beauty_preset: beautyPreset,
+    let isMounted = true;
+    api.getCurrentUser()
+      .then((user) => {
+        if (isMounted && user) {
+          setCurrentUser(user);
+          setCredits(user.credits);
+        }
+      })
+      .catch((err: unknown) => {
+        console.warn('Session check skipped, using local studio defaults:', err);
       });
+    return () => {
+      isMounted = false;
+    };
+  }, [setCurrentUser, setCredits]);
 
-      const sampleItem: PhotoItem = {
-        id: data.id,
-        name: data.filename,
-        originalUrl: data.original_data_uri,
-        enhancedUrl: data.enhanced_data_uri,
-        crop8rUrl: data.crop_8r_data_uri,
-        crop2x2Url: data.crop_2x2_data_uri,
-        status: 'done',
-        analysis: data.analysis,
-      };
+  // Initial Sample Fetch
+  useEffect(() => {
+    let isMounted = true;
+    const loadInitialSample = async () => {
+      try {
+        const data = await api.getSample({
+          bg_replacement_enabled: bgReplacementEnabled,
+          backdrop_type: backdropType,
+          beauty_preset: beautyPreset,
+        });
 
-      setPhotos([sampleItem]);
-      setActivePhotoId(sampleItem.id);
-      if (data.studio_credits !== undefined) {
-        setCredits(data.studio_credits);
+        if (isMounted && data) {
+          const sampleItem: PhotoItem = {
+            id: data.id,
+            name: data.filename,
+            originalUrl: data.original_data_uri,
+            enhancedUrl: data.enhanced_data_uri,
+            crop8rUrl: data.crop_8r_data_uri,
+            crop2x2Url: data.crop_2x2_data_uri,
+            status: 'done',
+            analysis: data.analysis,
+          };
+          setPhotos([sampleItem]);
+          setActivePhotoId(sampleItem.id);
+          if (data.studio_credits !== undefined) {
+            setCredits(data.studio_credits);
+          }
+        }
+      } catch (err: unknown) {
+        console.warn('Could not load sample portrait:', err);
       }
-    } catch {
-      console.warn('API error fetching sample');
-    }
-  };
+    };
+
+    loadInitialSample();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const activePhoto = photos.find((p) => p.id === activePhotoId) || photos[0] || null;
 
-  // Process single active photo
+  // Process Active Photo
   const handleProcessActive = async () => {
     if (!activePhoto) return;
     setIsProcessing(true);
-    setStatusMessage('Processing photo with neural retouching...');
 
     try {
       const result = await api.processPhoto({
@@ -346,15 +340,17 @@ export default function App() {
       if (result.studio_credits !== undefined) {
         setCredits(result.studio_credits);
       }
-    } catch (err: any) {
-      if (err?.message?.includes('402') || err?.message?.includes('Insufficient')) {
-        setShowTopUpModal(true);
+      addToast('success', 'Neural retouching applied successfully.');
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : 'Processing error occurred';
+      if (errorMsg.includes('402') || errorMsg.includes('Insufficient')) {
+        openTopUpModal();
+        addToast('error', 'Zero studio credits remaining. Please top up to continue.');
       } else {
-        console.error('Process active error:', err);
+        addToast('error', errorMsg);
       }
     } finally {
       setIsProcessing(false);
-      setStatusMessage('');
     }
   };
 
@@ -362,10 +358,10 @@ export default function App() {
   const handleBulkApply = async () => {
     if (photos.length === 0) return;
     setIsBatchRunning(true);
-    setBatchProgress(10);
+    setBatchProgress(20);
 
     try {
-      setBatchProgress(40);
+      setBatchProgress(50);
       const data = await api.batchProcess({
         bg_replacement_enabled: bgReplacementEnabled,
         backdrop_type: backdropType,
@@ -387,12 +383,14 @@ export default function App() {
         engine: engineMode,
       });
 
-      setBatchProgress(85);
-      const resultMap = new Map(data.items.map((item: any) => [item.id, item]));
+      setBatchProgress(90);
+      const resultMap = new Map<string, PhotoItem>(
+        data.items.map((item: PhotoItem) => [item.id, item])
+      );
 
       setPhotos((prev) =>
         prev.map((p) => {
-          const res: any = resultMap.get(p.id);
+          const res = resultMap.get(p.id);
           if (res) {
             return {
               ...p,
@@ -411,25 +409,27 @@ export default function App() {
       if (data.studio_credits !== undefined) {
         setCredits(data.studio_credits);
       }
-    } catch (err: any) {
-      if (err?.message?.includes('402')) {
-        setShowTopUpModal(true);
+      addToast('success', `Batch complete! Processed ${photos.length} portraits.`);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : 'Batch processing error';
+      if (errorMsg.includes('402')) {
+        openTopUpModal();
       }
-      console.error('Bulk process error:', err);
+      addToast('error', errorMsg);
     } finally {
       setIsBatchRunning(false);
       setBatchProgress(100);
     }
   };
 
-  // Upload Photos
+  // Upload Batch
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
     const files = Array.from(e.target.files);
 
     try {
       const data = await api.batchUpload(files);
-      const uploaded: PhotoItem[] = data.items.map((item: any) => ({
+      const uploaded: PhotoItem[] = data.items.map((item: PhotoItem) => ({
         id: item.id,
         name: item.name,
         originalUrl: item.originalUrl,
@@ -444,13 +444,14 @@ export default function App() {
       if (uploaded.length > 0) {
         setActivePhotoId(uploaded[0].id);
       }
-    } catch (err) {
-      console.error('Batch upload error:', err);
+      addToast('success', `Uploaded ${files.length} images to batch queue.`);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : 'Upload failed';
+      addToast('error', errorMsg);
     }
   };
 
-  // Download Single Photo
-  const handleDownload = () => {
+  const handleDownloadActive = () => {
     if (!activePhoto || !activePhoto.enhancedUrl) return;
     const targetUrl =
       printViewMode === '8r' && activePhoto.crop8rUrl
@@ -468,7 +469,6 @@ export default function App() {
     document.body.removeChild(a);
   };
 
-  // Download Structured Print Package ZIP
   const handleDownloadZip = () => {
     window.location.href = '/api/export-zip?school_name=Graduation_Batch_2026';
   };
@@ -478,42 +478,47 @@ export default function App() {
       className="flex flex-col h-screen bg-[#0d1117] text-[#c9d1d9] select-none overflow-hidden font-sans"
       onMouseUp={() => setIsDragging(false)}
     >
-      {/* 1. Global Navbar */}
+      {/* Global Toast Container */}
+      <ToastContainer />
+
+      {/* Global Navbar */}
       <Navbar
         currentPage={currentPage}
-        onNavigate={handleNavigate}
+        onNavigate={setCurrentPage}
         currentUser={currentUser}
-        onLogout={() => {
-          api.logout();
-          setCurrentUser(null);
-        }}
-        onOpenTopUp={() => setShowTopUpModal(true)}
+        onLogout={logout}
+        onOpenTopUp={openTopUpModal}
       />
 
-      {/* 2. Routing Views */}
-      {currentPage === 'landing' && <LandingPage onNavigate={handleNavigate} />}
+      {/* Routing Views */}
+      {currentPage === 'landing' && <LandingPage onNavigate={setCurrentPage} />}
 
       {currentPage === 'auth' && (
         <AuthPage
-          onNavigate={handleNavigate}
+          onNavigate={setCurrentPage}
           initialMode={authInitialMode}
           onLoginSuccess={(user) => {
             setCurrentUser(user);
             setCredits(user.credits);
+            addToast('success', `Welcome back, ${user.name}!`);
           }}
         />
       )}
 
       {currentPage === 'user_dashboard' && (
         <UserDashboard
-          onNavigate={handleNavigate}
+          onNavigate={setCurrentPage}
           currentUser={currentUser}
-          onOpenTopUp={() => setShowTopUpModal(true)}
+          onOpenTopUp={openTopUpModal}
         />
       )}
 
       {currentPage === 'admin_dashboard' && (
-        <AdminDashboard onNavigate={handleNavigate} currentUser={currentUser} />
+        <AdminPanel onNavigate={setCurrentPage} />
+      )}
+
+      {currentPage === 'student_portal' && (
+        <StudentPortal />
       )}
 
       {currentPage === 'editor' && (
@@ -600,7 +605,7 @@ export default function App() {
               </button>
 
               <button
-                onClick={handleDownload}
+                onClick={handleDownloadActive}
                 className="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md bg-[#f0f6fc] hover:bg-[#ffffff] text-[#0d1117] transition active:scale-98 shadow-sm"
               >
                 <Download className="w-3.5 h-3.5 text-[#0d1117]" />
@@ -667,7 +672,7 @@ export default function App() {
             />
           </div>
 
-          {/* Batch Processing Overlay */}
+          {/* Batch Progress Bar Overlay */}
           {isBatchRunning && (
             <div className="absolute bottom-20 inset-x-12 z-30 bg-[#161b22] border border-[#30363d] p-4 rounded-md shadow-2xl flex items-center gap-4">
               <div className="w-7 h-7 rounded bg-[#21262d] border border-[#30363d] text-[#f0f6fc] flex items-center justify-center shrink-0">
@@ -690,7 +695,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Bottom Batch Filmstrip */}
+          {/* Bottom Filmstrip */}
           <BatchFilmstrip
             photos={photos}
             activePhotoId={activePhotoId}
@@ -705,13 +710,11 @@ export default function App() {
 
       {/* Top-Up Modal */}
       <TopUpModal
-        isOpen={showTopUpModal}
-        onClose={() => setShowTopUpModal(false)}
+        isOpen={isTopUpModalOpen}
+        onClose={closeTopUpModal}
         onSuccess={(addedCredits) => {
-          setCredits((c) => c + addedCredits);
-          if (currentUser) {
-            setCurrentUser({ ...currentUser, credits: currentUser.credits + addedCredits });
-          }
+          setCredits(currentUser ? currentUser.credits + addedCredits : addedCredits);
+          addToast('success', `Added ${addedCredits} credits to studio account.`);
         }}
       />
     </div>

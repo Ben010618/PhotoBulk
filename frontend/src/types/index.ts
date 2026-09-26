@@ -1,4 +1,10 @@
-export type PageView = 'landing' | 'auth' | 'user_dashboard' | 'admin_dashboard' | 'editor';
+export type PageView =
+  | 'landing'
+  | 'auth'
+  | 'user_dashboard'
+  | 'admin_dashboard'
+  | 'editor'
+  | 'student_portal';
 
 export interface UserSession {
   name: string;
@@ -6,6 +12,23 @@ export interface UserSession {
   role: 'photographer' | 'admin';
   studioName: string;
   credits: number;
+}
+
+export interface PhotoAnalysis {
+  sharpness_score?: number;
+  sharpness_grade?: string;
+  blink_status?: 'open' | 'blink';
+  is_best_shot?: boolean;
+  star_rating?: number;
+  review_needed?: boolean;
+  review_reason?: string;
+  flag_reason?: string;
+  face_count?: number;
+  head_pose?: {
+    roll_deg?: number;
+    pitch_deg?: number;
+    yaw_deg?: number;
+  };
 }
 
 export interface PhotoItem {
@@ -18,22 +41,7 @@ export interface PhotoItem {
   previewUrl?: string;
   masterUrl?: string;
   status: 'pending' | 'processing' | 'ready' | 'done';
-  analysis?: {
-    sharpness_score?: number;
-    sharpness_grade?: string;
-    blink_status?: 'open' | 'blink';
-    is_best_shot?: boolean;
-    star_rating?: number;
-    review_needed?: boolean;
-    review_reason?: string;
-    flag_reason?: string;
-    face_count?: number;
-    head_pose?: {
-      roll_deg?: number;
-      pitch_deg?: number;
-      yaw_deg?: number;
-    };
-  };
+  analysis?: PhotoAnalysis;
 }
 
 export interface BackdropPreset {
@@ -66,4 +74,29 @@ export interface RegaliaProfile {
   shine_reduction: number;
   edge_protection_level: string;
   description: string;
+}
+
+export interface ToastNotification {
+  id: string;
+  type: 'success' | 'error' | 'info';
+  message: string;
+  timestamp: number;
+}
+
+export interface StudentProof {
+  studentId: string;
+  studentName: string;
+  schoolName: string;
+  degree: string;
+  academicYear: string;
+  watermarkedPreviewUrl: string;
+  qrCodeUrl: string;
+  approvalStatus: 'pending' | 'approved' | 'revision_requested';
+  feedbackNotes?: string;
+}
+
+export interface ApiStandardError {
+  detail: string;
+  code?: string;
+  status_code?: number;
 }

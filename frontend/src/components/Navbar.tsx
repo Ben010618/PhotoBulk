@@ -13,15 +13,8 @@ import {
   ChevronDown
 } from 'lucide-react';
 
-export type PageView = 'landing' | 'auth' | 'user_dashboard' | 'admin_dashboard' | 'editor';
-
-export interface UserSession {
-  name: string;
-  email: string;
-  role: 'photographer' | 'admin';
-  studioName: string;
-  credits: number;
-}
+import { PageView, UserSession } from '../types';
+export type { PageView, UserSession };
 
 interface NavbarProps {
   currentPage: PageView;
@@ -114,6 +107,18 @@ export const Navbar: React.FC<NavbarProps> = ({
                 Admin
               </span>
             )}
+          </button>
+
+          <button
+            onClick={() => onNavigate('student_portal')}
+            className={`px-3 py-1.5 rounded transition flex items-center gap-1.5 ${
+              currentPage === 'student_portal'
+                ? 'bg-[#21262d] text-[#f0f6fc] border border-[#30363d]'
+                : 'text-[#8b949e] hover:text-[#f0f6fc] hover:bg-[#21262d]/50'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5 text-[#58a6ff]" />
+            <span>Student Portal</span>
           </button>
         </nav>
       </div>
