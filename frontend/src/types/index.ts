@@ -155,10 +155,20 @@ export interface CheckoutResponse {
 
 export interface JobStatusResponse {
   job_id: string;
-  status: 'queued' | 'processing' | 'done' | 'failed';
+  status: 'queued' | 'processing' | 'completed' | 'failed' | 'done';
   progress: number;
-  result?: Record<string, unknown>;
+  total?: number;
+  processed?: number;
+  created_at?: number;
+  updated_at?: number;
+  message?: string;
   error?: string;
+  items?: PhotoItem[];
+  studio_credits?: number;
+  total_time_ms?: number;
+  per_photo_latency_ms?: number;
+  engine_used?: string;
+  result?: Record<string, unknown>;
 }
 
 export interface AiConfigResponse {

@@ -36,6 +36,21 @@
    - Automated 90-day retention purge protocol and Right to Erasure handling.
    - Full governance documentation in [`PRIVACY_AND_COMPLIANCE_RA10173.md`](file:///c:/Users/USER/OneDrive%20-%20Department%20of%20Education/Desktop/PhotoBulk/PRIVACY_AND_COMPLIANCE_RA10173.md).
 
+6. **Asynchronous Non-Blocking Background Batch Processing**
+   - High-throughput ML batch operations return `HTTP 202 Accepted` with a tracking `job_id`.
+   - Dedicated background workers offload heavy YuNet face detection and U2Net neural matting from the main API thread.
+   - Microsecond live memory tracking paired with persistent SQLite/PostgreSQL `jobs` ledger.
+   - Frontend polling with real-time UI progress updates and automatic recovery.
+
+7. **Zero-Egress Direct Edge Storage (Cloudflare R2)**
+   - Pre-signed S3 PUT/GET upload and download endpoints (`/api/storage/presigned-url`, `/api/storage/presigned-upload`).
+   - Browser client streams high-resolution portraits directly to Cloudflare R2 edge without server ingress bottleneck.
+   - Automatic local streaming fallback for air-gapped or offline studio environments.
+
+8. **Cryptographic Payment Webhooks**
+   - Constant-time HMAC-SHA256 signature verification (`Paymongo-Signature`).
+   - 300-second timestamp drift tolerance preventing replay attacks and fraudulent credit top-ups.
+
 ---
 
 ## System Architecture
@@ -44,24 +59,25 @@
 ┌────────────────────────────────────────────────────────┐
 │              Browser Client (React 19 + Vite)          │
 │   Comparison Slider | Filmstrip Queue | Studio Sliders │
+│   Zustand Stores (Auth, UI, Editor) | Axios Client     │
 └───────────────────────────┬────────────────────────────┘
-                            │ REST / JSON (Streaming URLs)
+                            │ REST / JSON (Polling & Streaming)
 ┌───────────────────────────▼────────────────────────────┐
 │                  Nginx Reverse Proxy                   │
 │          SSL/TLS | Gzip | CSP & Security Headers       │
 └───────────────────────────┬────────────────────────────┘
                             │ Port 8000
 ┌───────────────────────────▼────────────────────────────┐
-│                   FastAPI Backend                      │
-│     Auth & Sessions  │ Credit Checks │ Upload Limits   │
+│              FastAPI Asynchronous Backend              │
+│     Auth & Sessions  │ Credit Checks │ 202 Jobs Ledger │
 └───────┬───────────────────┬───────────────────┬────────┘
         │                   │                   │
 ┌───────▼────────┐  ┌───────▼────────┐  ┌───────▼────────┐
-│ AI Vision      │  │ Storage & DB   │  │ Payment Engine │
+│ ML Pipeline    │  │ Storage & DB   │  │ Payment Engine │
 │ • rembg U2Net  │  │ • SQLite / PG  │  │ • PayMongo     │
-│ • YuNet Faces  │  │ • RLS Policies │  │ • HMAC-SHA256  │
-│ • OpenCV LAB   │  │ • Cloudflare R2│  │ • GCash/Maya   │
-│ • Gemini 2.5   │  │ • 90-Day Purge │  │ • 1 Credit/Pic │
+│ • YuNet Faces  │  │ • Background   │  │ • HMAC-SHA256  │
+│ • CIELAB ΔL*   │  │   Job Ledger   │  │ • Anti-Replay  │
+│ • Pydantic V2  │  │ • Cloudflare R2│  │ • 1 Credit/Pic │
 └────────────────┘  └────────────────┘  └────────────────┘
 ```
 
@@ -161,13 +177,13 @@ Backups are compressed with gzip, verified with `PRAGMA integrity_check`, stored
 
 ## Running the Automated Test Suite
 
-Run the full automated test suite covering security, matting regression, color spaces, credit enforcement, and crops:
+Run the full automated test suite covering security, matting regression, color spaces, credit enforcement, background workers, and crops:
 
 ```bash
 pytest tests/test_kamera_suite.py -v
 ```
 
-All 12 tests validate:
+All 17 tests validate:
 - Row-Level Security (RLS) multi-tenant isolation
 - Admin endpoint session protection
 - PayMongo webhook signature verification & idempotency
@@ -179,6 +195,11 @@ All 12 tests validate:
 - Multi-student batch gang sheet PDF rendering
 - Filename sanitization against path traversal
 - URL image streaming
+- Safe nested directory and file I/O operations
+- Cloudflare R2 presigned edge direct uploads & registration
+- Cryptographic HMAC-SHA256 signature and replay-attack rejection
+- Standardized ML pipeline (`process_image` with `ProcessingParams`)
+- Asynchronous non-blocking batch worker, `202 Accepted`, live polling & DB ledger persistence
 
 ---
 

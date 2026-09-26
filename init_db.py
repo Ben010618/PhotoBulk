@@ -150,6 +150,24 @@ def init_database():
     );
     """)
 
+    # 7. Asynchronous Background Jobs Ledger
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        studio_id TEXT NOT NULL,
+        job_type TEXT NOT NULL DEFAULT 'batch_process',
+        status TEXT NOT NULL DEFAULT 'queued',
+        progress_percentage INTEGER DEFAULT 0,
+        total_items INTEGER DEFAULT 0,
+        processed_items INTEGER DEFAULT 0,
+        result_json TEXT,
+        error_message TEXT,
+        FOREIGN KEY (studio_id) REFERENCES studios(id) ON DELETE CASCADE
+    );
+    """)
+
     conn.commit()
 
     # Seed initial default studio and admin user if empty
@@ -192,6 +210,62 @@ def init_database():
 
     conn.close()
     return DB_PATH
+
+
+def record_job_db(job_id: str, studio_id: str, status: str = "queued", total: int = 0) -> None:
+    """Inserts an initial job record into database."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cursor.execute("""
+            INSERT INTO jobs (id, created_at, updated_at, studio_id, job_type, status, progress_percentage, total_items, processed_items)
+            VALUES (?, ?, ?, ?, 'batch_process', ?, 0, ?, 0)
+            ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, status = excluded.status;
+        """, (job_id, now, now, studio_id, status, total))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("[init_db] Notice recording job in DB:", e)
+
+
+def update_job_db(
+    job_id: str,
+    status: str,
+    progress: int,
+    processed: int,
+    result_json: Optional[str] = None,
+    error: Optional[str] = None
+) -> None:
+    """Updates job progress, state, and results in database."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cursor.execute("""
+            UPDATE jobs
+            SET updated_at = ?, status = ?, progress_percentage = ?, processed_items = ?, result_json = ?, error_message = ?
+            WHERE id = ?;
+        """, (now, status, progress, processed, result_json, error, job_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print("[init_db] Notice updating job in DB:", e)
+
+
+def fetch_job_db(job_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves a job record from database."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM jobs WHERE id = ? LIMIT 1;", (job_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return dict(row)
+    except Exception as e:
+        print("[init_db] Notice fetching job from DB:", e)
+    return None
 
 
 if __name__ == "__main__":

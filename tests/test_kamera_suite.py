@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
-from init_db import init_database, get_db_connection
+from init_db import init_database, get_db_connection, fetch_job_db
 from auth import create_access_token
 from analyzer_engine import analyze_portrait, get_face_detector
 from beautification_presets import apply_beauty_preset_to_image, BEAUTY_PRESETS, LIP_COLOR_PALETTES
@@ -534,6 +534,77 @@ class TestKameraPhSuite(unittest.TestCase):
             result_missing = process_image(missing_input)
             self.assertFalse(result_missing.success)
             self.assertIn("not found", result_missing.error.lower())
+
+    def test_17_async_batch_job_worker_and_polling(self):
+        """Task Phase 3: Validates 202 Accepted, background worker execution, polling, and DB ledger."""
+        import time
+
+        # Top up studio credits first to ensure sufficient balance
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE studios SET credit_balance = 500 WHERE id = 'studio-default';")
+        conn.commit()
+        conn.close()
+
+        # 1. Upload 2 synthetic images to batch store
+        success, enc1 = cv2.imencode('.jpg', self.test_img)
+        files = [
+            ("files", ("async_student_1.jpg", enc1.tobytes(), "image/jpeg")),
+            ("files", ("async_student_2.jpg", enc1.tobytes(), "image/jpeg")),
+        ]
+        res_upload = self.client.post("/api/batch-upload", files=files)
+        self.assertEqual(res_upload.status_code, 200)
+        self.assertEqual(res_upload.json()["uploaded_count"], 2)
+
+        # 2. Test non-blocking batch process (HTTP 202 Accepted)
+        res_process = self.client.post("/api/batch-process", data={
+            "bg_replacement_enabled": "true",
+            "backdrop_type": "royal_navy",
+            "beauty_preset": "morena_radiant"
+        })
+        self.assertEqual(res_process.status_code, 202)
+        job_data = res_process.json()
+        self.assertIn("job_id", job_data)
+        job_id = job_data["job_id"]
+        self.assertIn(job_data["status"], ["queued", "processing", "completed"])
+
+        # 3. Poll GET /api/jobs/{job_id} until completed
+        completed = False
+        final_job = None
+        for _ in range(40):
+            res_poll = self.client.get(f"/api/jobs/{job_id}")
+            self.assertEqual(res_poll.status_code, 200)
+            poll_data = res_poll.json()
+            if poll_data["status"] == "completed":
+                completed = True
+                final_job = poll_data
+                break
+            time.sleep(0.05)
+
+        self.assertTrue(completed, f"Job {job_id} did not complete in time")
+        self.assertEqual(final_job["progress"], 100)
+        self.assertGreaterEqual(len(final_job["items"]), 2)
+
+        # 4. Verify job was persisted in database ledger
+        db_job = fetch_job_db(job_id)
+        self.assertIsNotNone(db_job)
+        self.assertEqual(db_job["status"], "completed")
+        self.assertEqual(db_job["progress_percentage"], 100)
+
+        # 5. Test synchronous execution fallback with ?sync=true
+        res_sync = self.client.post("/api/batch-process?sync=true", data={
+            "bg_replacement_enabled": "true",
+            "backdrop_type": "royal_navy",
+            "beauty_preset": "morena_radiant"
+        })
+        self.assertEqual(res_sync.status_code, 200)
+        sync_data = res_sync.json()
+        self.assertIn("processed_count", sync_data)
+        self.assertIn("items", sync_data)
+
+        # 6. Test 404 for invalid job id
+        res_404 = self.client.get("/api/jobs/job-non-existent-xyz")
+        self.assertEqual(res_404.status_code, 404)
 
 
 if __name__ == "__main__":

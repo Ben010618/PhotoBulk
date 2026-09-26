@@ -333,7 +333,10 @@ export const apiClient = {
     }
   },
 
-  async batchProcess(options: Record<string, string | number | boolean>): Promise<BatchProcessResponse> {
+  async batchProcess(
+    options: Record<string, string | number | boolean>,
+    onProgress?: (progressPct: number, job: JobStatusResponse) => void
+  ): Promise<BatchProcessResponse> {
     try {
       const formData = new FormData();
       Object.entries(options).forEach(([k, v]) => {
@@ -342,10 +345,22 @@ export const apiClient = {
         }
       });
 
-      const res = await axiosInstance.post<BatchProcessResponse>('/api/batch-process', formData, {
+      const res = await axiosInstance.post<BatchProcessResponse | JobStatusResponse>('/api/batch-process', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      return res.data;
+
+      // If backend responded with 202 or returned a JobStatusResponse (with job_id):
+      if ('job_id' in res.data && res.data.job_id) {
+        const completedJob = await this.pollJobUntilCompletion(res.data.job_id, onProgress);
+        return {
+          total_processed: completedJob.processed ?? (completedJob.items ? completedJob.items.length : 0),
+          per_photo_latency_ms: completedJob.per_photo_latency_ms ?? 0,
+          studio_credits: completedJob.studio_credits,
+          items: completedJob.items ?? [],
+        };
+      }
+
+      return res.data as BatchProcessResponse;
     } catch (err: unknown) {
       console.error('[apiClient.batchProcess] Batch processing failed:', err);
       throw err;
@@ -381,6 +396,32 @@ export const apiClient = {
       console.error(`[apiClient.pollJob] Failed to poll job ${jobId}:`, err);
       throw err;
     }
+  },
+
+  /**
+   * Polls an asynchronous job until status is completed or failed
+   */
+  async pollJobUntilCompletion(
+    jobId: string,
+    onProgress?: (progressPct: number, job: JobStatusResponse) => void,
+    intervalMs: number = 300,
+    timeoutMs: number = 180000
+  ): Promise<JobStatusResponse> {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      const job = await this.pollJob(jobId);
+      if (onProgress) {
+        onProgress(job.progress, job);
+      }
+      if (job.status === 'completed' || job.status === 'done') {
+        return job;
+      }
+      if (job.status === 'failed') {
+        throw new Error(job.error || `Background job ${jobId} failed.`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    throw new Error(`Background job ${jobId} timed out after ${timeoutMs}ms.`);
   },
 
   /**

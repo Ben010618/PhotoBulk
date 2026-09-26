@@ -361,27 +361,31 @@ export default function App() {
     setBatchProgress(20);
 
     try {
-      setBatchProgress(50);
-      const data = await api.batchProcess({
-        bg_replacement_enabled: bgReplacementEnabled,
-        backdrop_type: backdropType,
-        regalia_profile: regaliaProfile,
-        beauty_preset: beautyPreset,
-        skin_smoothing: skinSmoothing / 100,
-        blemish_cut: blemishRemoval / 100,
-        dark_spot_whitening: darkSpotWhitening / 100,
-        shine_reduction: shineCut / 100,
-        lip_color: lipColor,
-        lip_intensity: lipIntensity / 100,
-        glow_intensity: glowIntensity / 100,
-        catchlight_boost: catchlightBoost / 100,
-        teeth_whitening: teethWhitening / 100,
-        lighting_temp: lightingTemp,
-        studio_light_intensity: studioLightIntensity / 100,
-        rim_light_boost: rimLightBoost / 100,
-        iron_strength: togaIron / 100,
-        engine: engineMode,
-      });
+      const data = await api.batchProcess(
+        {
+          bg_replacement_enabled: bgReplacementEnabled,
+          backdrop_type: backdropType,
+          regalia_profile: regaliaProfile,
+          beauty_preset: beautyPreset,
+          skin_smoothing: skinSmoothing / 100,
+          blemish_cut: blemishRemoval / 100,
+          dark_spot_whitening: darkSpotWhitening / 100,
+          shine_reduction: shineCut / 100,
+          lip_color: lipColor,
+          lip_intensity: lipIntensity / 100,
+          glow_intensity: glowIntensity / 100,
+          catchlight_boost: catchlightBoost / 100,
+          teeth_whitening: teethWhitening / 100,
+          lighting_temp: lightingTemp,
+          studio_light_intensity: studioLightIntensity / 100,
+          rim_light_boost: rimLightBoost / 100,
+          iron_strength: togaIron / 100,
+          engine: engineMode,
+        },
+        (progressPct) => {
+          setBatchProgress(progressPct);
+        }
+      );
 
       setBatchProgress(90);
       const resultMap = new Map<string, PhotoItem>(

@@ -47,7 +47,13 @@ except ImportError:
 
 logger = logging.getLogger("kameraph.api_server")
 
-from init_db import get_db_connection, init_database
+from init_db import (
+    get_db_connection,
+    init_database,
+    record_job_db,
+    update_job_db,
+    fetch_job_db
+)
 from auth import get_current_user, get_current_user_optional, require_admin, authenticate_user, create_access_token
 from r2_storage import (
     storage,
@@ -98,6 +104,23 @@ class RegisterPhotoRequest(BaseModel):
 class RegisterPhotoResponse(BaseModel):
     success: bool
     item: Dict[str, Any]
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str  # 'queued' | 'processing' | 'completed' | 'failed'
+    progress: int = 0
+    total: int = 0
+    processed: int = 0
+    created_at: float
+    updated_at: Optional[float] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+    items: Optional[List[Dict[str, Any]]] = None
+    studio_credits: Optional[int] = None
+    total_time_ms: Optional[int] = None
+    per_photo_latency_ms: Optional[int] = None
+    engine_used: Optional[str] = None
 
 # Auto-instantiate database schema
 init_database()
@@ -944,9 +967,124 @@ async def batch_upload_endpoint(
 
     return {"uploaded_count": len(results), "items": results}
 
+# =========================================================================
+# ASYNCHRONOUS BACKGROUND JOBS & BATCH WORKER
+# =========================================================================
+
+def _run_batch_job_worker(
+    job_id: str,
+    target_ids: List[str],
+    params: ProcessingParams,
+    studio_id: str
+):
+    """
+    Asynchronous non-blocking background batch worker.
+    Processes photos via standardized process_image pipeline, updates live progress,
+    and records results with Zero Silent Failures.
+    """
+    start_all = time.time()
+    total = len(target_ids)
+    processed_items = []
+
+    ACTIVE_JOBS[job_id]["status"] = "processing"
+    ACTIVE_JOBS[job_id]["updated_at"] = time.time()
+    update_job_db(job_id, "processing", 0, 0)
+
+    try:
+        for idx, pid in enumerate(target_ids, 1):
+            item = BATCH_STORE.get(pid)
+            if not item:
+                continue
+
+            try:
+                # Deduct 1 credit per successfully processed photo
+                deduct_studio_credit(studio_id, count=1)
+                img_bgr = item["img_bgr"]
+
+                pipe_res = process_image(img_bgr, parameters=params)
+                if pipe_res.success:
+                    enhanced_bgr = pipe_res.enhanced_bgr
+                    face_info = pipe_res.face_info
+                    item["enhanced_bgr"] = enhanced_bgr
+                    item["face_info"] = face_info
+                    item["analysis"] = pipe_res.analysis
+                    item["status"] = "done"
+
+                    crop_8r = pipe_res.crop_8r_bgr
+                    crop_2x2 = pipe_res.crop_2x2_bgr
+
+                    processed_items.append({
+                        "id": item["id"],
+                        "name": item["filename"],
+                        "previewUrl": f"/api/photos/{item['id']}/preview",
+                        "masterUrl": f"/api/photos/{item['id']}/master",
+                        "originalUrl": image_to_base64_data_uri(img_bgr, quality=75),
+                        "enhancedUrl": f"/api/photos/{item['id']}/master",
+                        "crop8rUrl": f"/api/photos/{item['id']}/crop-8r",
+                        "crop2x2Url": f"/api/photos/{item['id']}/crop-2x2",
+                        "latency_ms": pipe_res.latency_ms,
+                        "status": "done"
+                    })
+                else:
+                    item["status"] = "failed"
+                    item["error"] = pipe_res.error
+                    processed_items.append({
+                        "id": item["id"],
+                        "name": item["filename"],
+                        "status": "failed",
+                        "error": pipe_res.error
+                    })
+            except Exception as item_err:
+                logger.error(f"[batch_worker] Error processing photo {pid}: {item_err}\n{traceback.format_exc()}")
+                item["status"] = "failed"
+                item["error"] = str(item_err)
+                processed_items.append({
+                    "id": item["id"],
+                    "name": item.get("filename", pid),
+                    "status": "failed",
+                    "error": str(item_err)
+                })
+
+            pct = int((idx / max(1, total)) * 100)
+            ACTIVE_JOBS[job_id]["processed"] = idx
+            ACTIVE_JOBS[job_id]["progress"] = pct
+            ACTIVE_JOBS[job_id]["updated_at"] = time.time()
+            update_job_db(job_id, "processing", pct, idx)
+
+        total_time_ms = max(1, int((time.time() - start_all) * 1000))
+        avg_latency = total_time_ms // max(1, len(processed_items))
+        updated_studio = get_studio_state(studio_id)
+
+        ACTIVE_JOBS[job_id]["status"] = "completed"
+        ACTIVE_JOBS[job_id]["progress"] = 100
+        ACTIVE_JOBS[job_id]["total_time_ms"] = total_time_ms
+        ACTIVE_JOBS[job_id]["per_photo_latency_ms"] = avg_latency
+        ACTIVE_JOBS[job_id]["engine_used"] = detect_actual_engine()
+        ACTIVE_JOBS[job_id]["studio_credits"] = updated_studio["credit_balance"]
+        ACTIVE_JOBS[job_id]["items"] = processed_items
+        ACTIVE_JOBS[job_id]["updated_at"] = time.time()
+        ACTIVE_JOBS[job_id]["message"] = f"Successfully processed {len(processed_items)} photos in {total_time_ms}ms"
+
+        update_job_db(
+            job_id=job_id,
+            status="completed",
+            progress=100,
+            processed=len(processed_items),
+            result_json=json.dumps({"count": len(processed_items), "latency_ms": total_time_ms})
+        )
+        logger.info(f"[batch_worker] Job {job_id} completed successfully ({len(processed_items)} photos).")
+
+    except Exception as e:
+        logger.error(f"[batch_worker] Catastrophic failure in batch worker for {job_id}: {e}\n{traceback.format_exc()}")
+        ACTIVE_JOBS[job_id]["status"] = "failed"
+        ACTIVE_JOBS[job_id]["error"] = str(e)
+        ACTIVE_JOBS[job_id]["updated_at"] = time.time()
+        update_job_db(job_id, "failed", ACTIVE_JOBS[job_id].get("progress", 0), ACTIVE_JOBS[job_id].get("processed", 0), error=str(e))
+
 
 @app.post("/api/batch-process")
 async def batch_process_endpoint(
+    background_tasks: BackgroundTasks,
     bg_replacement_enabled: bool = Form(True),
     backdrop_type: str = Form("royal_navy"),
     beauty_preset: str = Form("morena_radiant"),
@@ -965,146 +1103,156 @@ async def batch_process_endpoint(
     rim_light_boost: float = Form(0.20),
     iron_strength: float = Form(0.70),
     engine: str = Form("local_hybrid"),
+    sync: bool = Query(False),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
-    """Processes entire active batch with credit check and real telemetry."""
+    """
+    Non-blocking batch processing endpoint.
+    Returns HTTP 202 Accepted with a job_id for background processing,
+    or executes synchronously if ?sync=true is specified.
+    """
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
     studio = get_studio_state(studio_id)
-    
+
     # Filter photos for current studio
     target_items = [p for p in BATCH_STORE.values() if p.get("studio_id") == studio_id or studio_id == "default_studio"]
     needed_credits = len(target_items)
-    
+
     if needed_credits > 0 and studio["credit_balance"] < needed_credits:
         raise HTTPException(
             status_code=402,
             detail=f"Insufficient studio credits. Batch requires {needed_credits} credits, but current balance is {studio['credit_balance']}."
         )
 
-    start_all = time.time()
-    processed_items = []
+    params = ProcessingParams(
+        bg_replacement_enabled=bg_replacement_enabled,
+        backdrop_type=backdrop_type,
+        beauty_preset=beauty_preset,
+        regalia_profile=regalia_profile,
+        skin_smoothing=skin_smoothing,
+        blemish_cut=blemish_cut,
+        dark_spot_whitening=dark_spot_whitening,
+        shine_reduction=shine_reduction,
+        lip_color=lip_color,
+        lip_intensity=lip_intensity,
+        glow_intensity=glow_intensity,
+        eye_catchlight=eye_catchlight,
+        teeth_whitening=teeth_whitening,
+        lighting_temp=lighting_temp,
+        studio_light_intensity=studio_light_intensity,
+        rim_light_boost=rim_light_boost,
+        iron_strength=iron_strength
+    )
 
-    for item in target_items:
-        # Deduct credit
-        deduct_studio_credit(studio["id"], count=1)
-        img_bgr = item["img_bgr"]
-        
-        enhanced_bgr, item_latency, face_info, engine_label = process_complete_workflow(
-            img_bgr,
-            bg_replacement_enabled=bg_replacement_enabled,
-            backdrop_type=backdrop_type,
-            beauty_preset=beauty_preset,
-            regalia_profile=regalia_profile,
-            skin_smoothing=skin_smoothing,
-            blemish_cut=blemish_cut,
-            dark_spot_whitening=dark_spot_whitening,
-            shine_reduction=shine_reduction,
-            lip_color=lip_color,
-            lip_intensity=lip_intensity,
-            glow_intensity=glow_intensity,
-            eye_catchlight=eye_catchlight,
-            teeth_whitening=teeth_whitening,
-            lighting_temp=lighting_temp,
-            studio_light_intensity=studio_light_intensity,
-            rim_light_boost=rim_light_boost,
-            iron_strength=iron_strength,
-            analysis_data=item.get("analysis")
-        )
-        
-        item["enhanced_bgr"] = enhanced_bgr
-        item["face_info"] = face_info
-        item["status"] = "done"
-        
-        crop_8r = crop_8r_aspect(enhanced_bgr)
-        crop_2x2 = crop_2x2_id(enhanced_bgr, face_info)
-        
-        processed_items.append({
-            "id": item["id"],
-            "name": item["filename"],
-            "previewUrl": f"/api/photos/{item['id']}/preview",
-            "masterUrl": f"/api/photos/{item['id']}/master",
-            "originalUrl": image_to_base64_data_uri(img_bgr, quality=75),
-            "enhancedUrl": image_to_base64_data_uri(enhanced_bgr, quality=80),
-            "crop8rUrl": image_to_base64_data_uri(crop_8r, quality=80),
-            "crop2x2Url": image_to_base64_data_uri(crop_2x2, quality=80),
-            "latency_ms": item_latency,
-            "status": "done"
-        })
+    # If client requested synchronous execution (for legacy/simple scripts):
+    if sync:
+        start_all = time.time()
+        processed_items = []
+        for item in target_items:
+            deduct_studio_credit(studio["id"], count=1)
+            pipe_res = process_image(item["img_bgr"], parameters=params)
+            if pipe_res.success:
+                item["enhanced_bgr"] = pipe_res.enhanced_bgr
+                item["face_info"] = pipe_res.face_info
+                item["status"] = "done"
+                processed_items.append({
+                    "id": item["id"],
+                    "name": item["filename"],
+                    "previewUrl": f"/api/photos/{item['id']}/preview",
+                    "masterUrl": f"/api/photos/{item['id']}/master",
+                    "originalUrl": image_to_base64_data_uri(item["img_bgr"], quality=75),
+                    "enhancedUrl": f"/api/photos/{item['id']}/master",
+                    "crop8rUrl": f"/api/photos/{item['id']}/crop-8r",
+                    "crop2x2Url": f"/api/photos/{item['id']}/crop-2x2",
+                    "latency_ms": pipe_res.latency_ms,
+                    "status": "done"
+                })
 
-    total_time_ms = max(1, int((time.time() - start_all) * 1000))
-    avg_latency = total_time_ms // max(1, len(processed_items))
-    updated_studio = get_studio_state(studio["id"])
+        total_time_ms = max(1, int((time.time() - start_all) * 1000))
+        avg_latency = total_time_ms // max(1, len(processed_items))
+        updated_studio = get_studio_state(studio["id"])
+        return {
+            "processed_count": len(processed_items),
+            "total_time_ms": total_time_ms,
+            "per_photo_latency_ms": avg_latency,
+            "engine_used": detect_actual_engine(),
+            "studio_credits": updated_studio["credit_balance"],
+            "items": processed_items
+        }
 
-    return {
-        "processed_count": len(processed_items),
-        "total_time_ms": total_time_ms,
-        "per_photo_latency_ms": avg_latency,
-        "engine_used": detect_actual_engine(),
-        "studio_credits": updated_studio["credit_balance"],
-        "items": processed_items
+    # Non-blocking compute: return HTTP 202 Accepted with job_id
+    job_id = f"job-{uuid.uuid4().hex[:12]}"
+    now = time.time()
+    ACTIVE_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "total": len(target_items),
+        "processed": 0,
+        "created_at": now,
+        "updated_at": now,
+        "message": "Batch processing accepted. Offloaded to asynchronous worker.",
+        "items": []
     }
+    record_job_db(job_id, studio["id"], "queued", len(target_items))
+
+    target_ids = [item["id"] for item in target_items]
+    background_tasks.add_task(_run_batch_job_worker, job_id, target_ids, params, studio["id"])
+
+    return JSONResponse(status_code=202, content=ACTIVE_JOBS[job_id])
 
 
-# =========================================================================
-# ASYNCHRONOUS BACKGROUND JOBS
-# =========================================================================
-
-async def _run_batch_job_worker(job_id: str, photo_ids: List[str], settings: Dict[str, Any], studio_id: str):
-    """Background worker updating job progress percentage."""
-    total = len(photo_ids)
-    for idx, pid in enumerate(photo_ids, 1):
-        if pid in BATCH_STORE:
-            item = BATCH_STORE[pid]
-            enhanced, _, face_info, _ = process_complete_workflow(
-                item["img_bgr"],
-                **settings
-            )
-            item["enhanced_bgr"] = enhanced
-            item["face_info"] = face_info
-            item["status"] = "done"
-
-        ACTIVE_JOBS[job_id]["processed"] = idx
-        ACTIVE_JOBS[job_id]["progress"] = int((idx / max(1, total)) * 100)
-        await asyncio.sleep(0.01)
-
-    ACTIVE_JOBS[job_id]["status"] = "completed"
-
-
-@app.post("/api/jobs/batch-process")
+@app.post("/api/jobs/batch-process", status_code=202)
 async def start_background_batch_job(
     background_tasks: BackgroundTasks,
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
-    """Spawns an asynchronous background processing job with polling support."""
+    """Direct convenience endpoint for spawning background batch processing."""
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
-    photo_ids = [pid for pid, item in BATCH_STORE.items() if item.get("studio_id") == studio_id or studio_id == "default_studio"]
-    
-    job_id = f"job-{uuid.uuid4()}"
+    target_items = [p for p in BATCH_STORE.values() if p.get("studio_id") == studio_id or studio_id == "default_studio"]
+
+    job_id = f"job-{uuid.uuid4().hex[:12]}"
+    now = time.time()
     ACTIVE_JOBS[job_id] = {
         "job_id": job_id,
-        "status": "processing",
+        "status": "queued",
         "progress": 0,
-        "total": len(photo_ids),
+        "total": len(target_items),
         "processed": 0,
-        "created_at": time.time()
+        "created_at": now,
+        "updated_at": now,
+        "message": "Batch processing accepted.",
+        "items": []
     }
-    
-    settings = {
-        "bg_replacement_enabled": True,
-        "backdrop_type": "royal_navy",
-        "beauty_preset": "morena_radiant"
-    }
-    background_tasks.add_task(_run_batch_job_worker, job_id, photo_ids, settings, studio_id)
-    return {"job_id": job_id, "status": "processing", "total": len(photo_ids)}
+    record_job_db(job_id, studio_id, "queued", len(target_items))
+
+    params = ProcessingParams()
+    target_ids = [item["id"] for item in target_items]
+    background_tasks.add_task(_run_batch_job_worker, job_id, target_ids, params, studio_id)
+    return JSONResponse(status_code=202, content=ACTIVE_JOBS[job_id])
 
 
-@app.get("/api/jobs/{job_id}")
+@app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job_status(job_id: str):
-    """Polls background job progress."""
+    """Polls live status, progress percentage, and results of asynchronous background jobs."""
     job = ACTIVE_JOBS.get(job_id)
-    if not job:
+    if job:
+        return JobStatusResponse(**job)
+
+    # Fallback to database for historical / persisted jobs
+    db_job = fetch_job_db(job_id)
+    if not db_job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+
+    return JobStatusResponse(
+        job_id=db_job["id"],
+        status=db_job["status"],
+        progress=db_job["progress_percentage"],
+        total=db_job["total_items"],
+        processed=db_job["processed_items"],
+        created_at=time.time(),
+        error=db_job.get("error_message")
+    )
 
 
 # =========================================================================
