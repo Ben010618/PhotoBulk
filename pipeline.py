@@ -339,6 +339,13 @@ def process_complete_workflow(
         face_info = {
             "bbox": [fb["x"], fb["y"], fb["width"], fb["height"]]
         }
+        if analysis.get("landmarks"):
+            face_info.update(analysis["landmarks"])
+    else:
+        # Mark photo "needs review" when no face is found
+        analysis["review_needed"] = True
+        if not analysis.get("review_reason"):
+            analysis["review_reason"] = "No clear face detected in portrait. Requires manual review."
 
     # 2. High-Fidelity Subject Segmentation
     subject_mask = get_subject_mask(img_bgr, face_info)
@@ -351,26 +358,39 @@ def process_complete_workflow(
         subject_isolated = img_bgr.copy()
 
     # 4. Skin Beautification, Melanin Radiance & Garment De-creasing
-    enhanced_portrait = apply_beauty_preset_to_image(
-        subject_isolated,
-        face_info=face_info,
-        preset_id=beauty_preset,
-        custom_adjustments={
-            "skin_smoothing": skin_smoothing,
-            "blemish_cut": blemish_cut,
-            "dark_spot_whitening": dark_spot_whitening,
-            "shine_reduction": shine_reduction,
-            "lip_color": lip_color,
-            "lip_intensity": lip_intensity,
-            "glow_intensity": glow_intensity,
-            "eye_catchlight": eye_catchlight,
-            "teeth_whitening": teeth_whitening,
-            "lighting_temp": lighting_temp,
-            "studio_light_intensity": studio_light_intensity,
-            "rim_light_boost": rim_light_boost,
-            "iron_strength": iron_strength
-        }
-    )
+    if face_info is None:
+        # When no face is found, skip facial steps but run studio lighting and grading
+        from beautification_presets import apply_studio_environment_lighting
+        subject_isolated_f = subject_isolated.astype(np.float32)
+        lit_bgr = apply_studio_environment_lighting(
+            subject_isolated_f,
+            subject_mask,
+            lighting_temp=lighting_temp,
+            studio_light_intensity=studio_light_intensity,
+            rim_light_boost=rim_light_boost
+        )
+        enhanced_portrait = np.clip(lit_bgr, 0, 255).astype(np.uint8)
+    else:
+        enhanced_portrait = apply_beauty_preset_to_image(
+            subject_isolated,
+            face_info=face_info,
+            preset_id=beauty_preset,
+            custom_adjustments={
+                "skin_smoothing": skin_smoothing,
+                "blemish_cut": blemish_cut,
+                "dark_spot_whitening": dark_spot_whitening,
+                "shine_reduction": shine_reduction,
+                "lip_color": lip_color,
+                "lip_intensity": lip_intensity,
+                "glow_intensity": glow_intensity,
+                "eye_catchlight": eye_catchlight,
+                "teeth_whitening": teeth_whitening,
+                "lighting_temp": lighting_temp,
+                "studio_light_intensity": studio_light_intensity,
+                "rim_light_boost": rim_light_boost,
+                "iron_strength": iron_strength
+            }
+        )
 
     actual_latency_ms = max(1, int((time.time() - start_time) * 1000))
     engine_label = detect_actual_engine()
@@ -412,9 +432,13 @@ def process_image(
         )
 
     try:
+        # 1.5 Portrait Quality Analysis (Run once on input portrait)
+        analysis = analyze_portrait(img_bgr)
+
         # 2. Run Complete Workflow
         enhanced_bgr, workflow_latency_ms, face_info, engine_label = process_complete_workflow(
             img_bgr,
+            analysis_data=analysis,
             bg_replacement_enabled=params.bg_replacement_enabled,
             backdrop_type=params.backdrop_type,
             beauty_preset=params.beauty_preset,
@@ -477,7 +501,6 @@ def process_image(
                 proof_path = str(p_proof)
 
         total_latency_ms = max(1, int((time.time() - start_time) * 1000))
-        analysis = analyze_portrait(enhanced_bgr)
 
         return ProcessedImageResult(
             success=True,

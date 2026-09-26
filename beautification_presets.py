@@ -530,12 +530,15 @@ def apply_beauty_preset_to_image(img_bgr, face_info=None, preset_id="morena_radi
     h, w = img_bgr.shape[:2]
     img_f = img_bgr.astype(np.float32)
 
-    if face_info is None:
+    if face_info is None or 'bbox' not in face_info:
         return img_bgr
 
     x, y, fw, fh = face_info['bbox']
-    r_eye, l_eye, nose = face_info['right_eye'], face_info['left_eye'], face_info['nose']
-    r_mouth, l_mouth = face_info['right_mouth'], face_info['left_mouth']
+    r_eye = face_info.get('right_eye') or [int(x + fw * 0.3), int(y + fh * 0.35)]
+    l_eye = face_info.get('left_eye') or [int(x + fw * 0.7), int(y + fh * 0.35)]
+    nose = face_info.get('nose') or [int(x + fw * 0.5), int(y + fh * 0.55)]
+    r_mouth = face_info.get('right_mouth') or [int(x + fw * 0.35), int(y + fh * 0.75)]
+    l_mouth = face_info.get('left_mouth') or [int(x + fw * 0.65), int(y + fh * 0.75)]
 
     # 1. Precise Facial & Neck Skin Mask in YCrCb
     skin_mask = np.zeros((h, w), dtype=np.uint8)
@@ -557,11 +560,11 @@ def apply_beauty_preset_to_image(img_bgr, face_info=None, preset_id="morena_radi
     skin_mask = cv2.bitwise_and(skin_mask, color_skin)
 
     # Protect eyes, nostrils, and lips from aggressive skin smoothing
-    cv2.circle(skin_mask, tuple(r_eye), int(fw * 0.14), 0, -1)
-    cv2.circle(skin_mask, tuple(l_eye), int(fw * 0.14), 0, -1)
-    cv2.circle(skin_mask, tuple(nose), int(fw * 0.08), 0, -1)
+    cv2.circle(skin_mask, (int(r_eye[0]), int(r_eye[1])), int(fw * 0.14), 0, -1)
+    cv2.circle(skin_mask, (int(l_eye[0]), int(l_eye[1])), int(fw * 0.14), 0, -1)
+    cv2.circle(skin_mask, (int(nose[0]), int(nose[1])), int(fw * 0.08), 0, -1)
     mouth_c = ((int(r_mouth[0]) + int(l_mouth[0])) // 2, (int(r_mouth[1]) + int(l_mouth[1])) // 2)
-    cv2.ellipse(skin_mask, tuple(mouth_c), (int(fw * 0.24), int(fh * 0.12)), 0, 0, 360, 0, -1)
+    cv2.ellipse(skin_mask, mouth_c, (int(fw * 0.24), int(fh * 0.12)), 0, 0, 360, 0, -1)
 
     # 2. Localized Blemish & Pimple Healing
     blemish_cut = float(params.get("blemish_cut", 0.70))

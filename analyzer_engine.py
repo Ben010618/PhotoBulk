@@ -164,6 +164,7 @@ def analyze_portrait(image_input: Union[np.ndarray, str, Path]) -> Dict[str, Any
             "is_best_shot": False,
             "star_rating": 1,
             "face_box": {"x": 0, "y": 0, "width": 0, "height": 0},
+            "landmarks": None,
             "forehead_anchor": {"x": 0, "y": 0},
             "hold_anchor": {"x": 0, "y": 0},
             "hold_hat_suitable": False
@@ -292,6 +293,13 @@ def analyze_portrait(image_input: Union[np.ndarray, str, Path]) -> Dict[str, Any
             "width": int(fw),
             "height": int(fh)
         },
+        "landmarks": {
+            "right_eye": [float(right_eye[0]), float(right_eye[1])],
+            "left_eye": [float(left_eye[0]), float(left_eye[1])],
+            "nose": [float(nose_tip[0]), float(nose_tip[1])],
+            "right_mouth": [float(right_mouth[0]), float(right_mouth[1])],
+            "left_mouth": [float(left_mouth[0]), float(left_mouth[1])]
+        } if has_face else None,
         "forehead_anchor": {
             "x": int(forehead_anchor[0]),
             "y": int(forehead_anchor[1])

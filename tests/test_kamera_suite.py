@@ -38,6 +38,7 @@ from regalia_profiles import REGALIA_PROFILES
 from pdf_engine import generate_contact_sheet_pdf, generate_lab_gang_sheet_pdf, generate_batch_lab_gang_sheet_pdf
 from pipeline import (
     process_complete_workflow,
+    process_image,
     crop_8r_aspect,
     crop_2x2_id,
     get_subject_mask,
@@ -60,6 +61,17 @@ class TestKameraPhSuite(unittest.TestCase):
         else:
             cls.test_img = np.full((800, 600, 3), (220, 220, 220), dtype=np.uint8)
             cv2.ellipse(cls.test_img, (300, 350), (90, 120), 0, 0, 360, (135, 170, 210), -1)
+
+        # Load real/synthetic face portrait fixture (with detectable face)
+        face_fixture_path = os.path.join(BASE_DIR, "tests", "fixtures", "sample_grad_face.jpg")
+        if os.path.exists(face_fixture_path):
+            cls.face_img = cv2.imread(face_fixture_path)
+        else:
+            alt_path = os.path.join(BASE_DIR, "local_storage", "Juan_DelaCruz_Graduation_Proof_KameraPh_Enhanced.jpg")
+            if os.path.exists(alt_path):
+                cls.face_img = cv2.imread(alt_path)
+            else:
+                cls.face_img = cls.test_img
 
     def test_01_database_and_rls_schema(self):
         """Verify database tables and seeded records exist."""
@@ -617,6 +629,31 @@ class TestKameraPhSuite(unittest.TestCase):
         # 6. Test 404 for invalid job id
         res_404 = self.client.get("/api/jobs/job-non-existent-xyz")
         self.assertEqual(res_404.status_code, 404)
+
+    def test_18_face_landmarks_pipeline_and_no_face_handling(self):
+        """Step 1: Verify face landmarks in analysis/face_info, no KeyError crash, and no-face handling."""
+        # 1. Test with real face fixture
+        analysis = analyze_portrait(self.face_img)
+        self.assertTrue(analysis["has_face"], "Face fixture portrait must have detectable face")
+        self.assertIsNotNone(analysis.get("landmarks"), "Landmarks must be returned in analysis")
+        for key in ["right_eye", "left_eye", "nose", "right_mouth", "left_mouth"]:
+            self.assertIn(key, analysis["landmarks"])
+
+        # 2. Verify complete workflow does not crash with KeyError
+        enhanced, latency, face_info, engine = process_complete_workflow(self.face_img)
+        self.assertIsNotNone(face_info)
+        self.assertIn("right_eye", face_info)
+        self.assertIn("left_eye", face_info)
+        self.assertEqual(enhanced.shape[:2], self.face_img.shape[:2])
+
+        # 3. Verify no-face handling (skips face retouching, runs backdrop+lighting, sets review_needed)
+        blank_img = np.full((400, 400, 3), 180, dtype=np.uint8)
+        no_face_res = process_image(blank_img)
+        self.assertTrue(no_face_res.success)
+        self.assertFalse(no_face_res.analysis["has_face"])
+        self.assertTrue(no_face_res.analysis["review_needed"])
+        self.assertIsNotNone(no_face_res.analysis.get("review_reason"))
+        self.assertIsNotNone(no_face_res.enhanced_bgr)
 
 
 if __name__ == "__main__":
