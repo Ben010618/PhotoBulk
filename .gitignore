@@ -50,6 +50,8 @@ temp_exports/
 uploads/
 storage/
 local_storage/
+demo_output/
+output/
 
 # Environment and sensitive keys
 .env
