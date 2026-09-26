@@ -749,6 +749,38 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertEqual(decontaminated.shape, dummy_img.shape)
         self.assertEqual(decontaminated.dtype, np.uint8)
 
+    def test_22_smart_ai_analysis_exposure_and_autocorrections(self):
+        """STEP 5: Validate smart portrait analysis metrics and automatic corrections."""
+        face_path = Path(__file__).parent / "fixtures" / "sample_grad_face.jpg"
+        if not face_path.exists():
+            self.skipTest("sample_grad_face.jpg fixture not found")
+        img = cv2.imread(str(face_path))
+
+        analysis = analyze_portrait(img)
+        self.assertTrue(analysis["has_face"])
+        self.assertEqual(analysis["face_count"], 1)
+        self.assertIn("plain_summary", analysis)
+        self.assertIn("eyes_open", analysis)
+        self.assertIn("head_tilt", analysis)
+        self.assertIn("face_exposure", analysis)
+        self.assertGreater(analysis["face_exposure"], 0)
+        self.assertIn("white_balance_cast", analysis)
+        self.assertIn("skin_texture_score", analysis)
+        self.assertIn("crop_suitability", analysis)
+        self.assertIn("auto_corrections", analysis)
+
+        auto_c = analysis["auto_corrections"]
+        self.assertIn("exposure_compensation_ev", auto_c)
+        self.assertIn("skin_smoothing", auto_c)
+        self.assertIn("blemish_cut", auto_c)
+
+        # Verify review flag handling for blurry or no-face image
+        blank = np.zeros((400, 400, 3), dtype=np.uint8)
+        blank_analysis = analyze_portrait(blank)
+        self.assertFalse(blank_analysis["has_face"])
+        self.assertTrue(blank_analysis["review_needed"])
+        self.assertIsNotNone(blank_analysis["review_reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

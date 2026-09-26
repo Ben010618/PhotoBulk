@@ -155,10 +155,18 @@ def analyze_portrait(image_input: Union[np.ndarray, str, Path]) -> Dict[str, Any
             "face_count": 0,
             "review_needed": True,
             "review_reason": f"Failed to load image: {str(load_err)}",
+            "plain_summary": f"Failed to load image: {str(load_err)}",
             "sharpness_score": 0.0,
             "sharpness_grade": "Unreadable",
             "blink_status": "blink",
+            "eyes_open": False,
             "eye_openness": 0.0,
+            "head_tilt": 0.0,
+            "face_exposure": 0.0,
+            "white_balance_cast": {"temp_cast": "neutral", "delta_b": 0.0, "delta_a": 0.0},
+            "skin_texture_score": 0.0,
+            "crop_suitability": {"suitable_8r": False, "suitable_2x2": False, "head_coverage_pct": 0.0},
+            "auto_corrections": {"exposure_compensation_ev": 0.0, "wb_temp_adjust_k": 0, "skin_smoothing": 0.50, "blemish_cut": 0.60},
             "smile_score": 0.0,
             "head_pose": {"roll_deg": 0.0, "pitch_deg": 0.0, "yaw_deg": 0.0},
             "is_best_shot": False,
@@ -228,14 +236,7 @@ def analyze_portrait(image_input: Union[np.ndarray, str, Path]) -> Dict[str, Any
 
             forehead_anchor = (float(eye_mid_x), float(max(0, eye_mid_y - fh * 0.45)))
 
-        if face_count > 1:
-            review_needed = True
-            review_reason = f"Multiple faces detected ({face_count} faces). Primary subject framed by largest size; manual review recommended."
-    else:
-        review_needed = True
-        review_reason = "No clear face detected. Manual crop and retouch review required."
-
-    # Face ROI for sharpness
+    # Face ROI for sharpness and skin analysis
     face_roi = gray[max(0, fy):min(h, fy + fh), max(0, fx):min(w, fx + fw)]
     sharpness = calculate_sharpness_score(gray, face_roi if has_face else None)
 
@@ -245,6 +246,108 @@ def analyze_portrait(image_input: Union[np.ndarray, str, Path]) -> Dict[str, Any
     else:
         blink_status = 'open'
         eye_openness = 85.0
+    eyes_open = bool(blink_status == 'open' and eye_openness >= 50.0)
+
+    # Boundary cutoff check
+    face_cutoff = bool(has_face and (fx <= 5 or fy <= 5 or (fx + fw) >= w - 5 or (fy + fh) >= h - 5))
+
+    # Flag "needs review" with clear reasons
+    if not has_face:
+        review_needed = True
+        review_reason = "No clear face detected in portrait."
+    elif face_count > 1:
+        review_needed = True
+        review_reason = f"Multiple faces detected ({face_count} faces). Primary subject framed by largest size."
+    elif not eyes_open:
+        review_needed = True
+        review_reason = "Eyes closed / blinking detected."
+    elif sharpness < 55.0:
+        review_needed = True
+        review_reason = f"Image is blurry (sharpness score {sharpness:.1f}/100)."
+    elif face_cutoff:
+        review_needed = True
+        review_reason = "Face is partially cut off by frame edge."
+    elif abs(roll) > 12.0:
+        review_needed = True
+        review_reason = f"Strong head tilt ({roll:.1f}°)."
+
+    # 1. Face Exposure (mean luminance of the skin area) & White Balance Cast
+    face_exposure = 128.0
+    ev_compensation = 0.0
+    skin_texture_score = 0.35
+    delta_b = 0.0
+    delta_a = 0.0
+    temp_cast = "neutral"
+
+    if has_face:
+        roi_bgr = image[max(0, fy):min(h, fy + fh), max(0, fx):min(w, fx + fw)]
+        if roi_bgr.size > 0:
+            roi_ycrcb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2YCrCb)
+            roi_lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+            cr = roi_ycrcb[:, :, 1]
+            cb = roi_ycrcb[:, :, 2]
+            skin_mask = (cr >= 130) & (cr <= 175) & (cb >= 75) & (cb <= 130)
+
+            if np.any(skin_mask):
+                skin_l = roi_lab[:, :, 0][skin_mask]
+                face_exposure = round(float(np.mean(skin_l)), 1)
+                # Target natural studio skin luminance ~ 155 (scale 0-255, ~61% L*)
+                target_l = 155.0
+                ev_compensation = round(float(np.clip(np.log2(target_l / max(face_exposure, 1.0)), -1.5, 1.5)), 2)
+
+                # Skin texture score (amount of fine detail and spots inside the skin mask)
+                skin_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+                g1 = cv2.GaussianBlur(skin_gray, (3, 3), 0)
+                g2 = cv2.GaussianBlur(skin_gray, (9, 9), 0)
+                diff = cv2.absdiff(g1, g2)
+                skin_texture_score = round(float(np.clip(np.mean(diff[skin_mask]) / 10.0, 0.0, 1.0)), 2)
+
+                # White balance cast
+                delta_b = round(float(np.mean(roi_lab[:, :, 2][skin_mask]) - 145.0), 1)
+                delta_a = round(float(np.mean(roi_lab[:, :, 1][skin_mask]) - 140.0), 1)
+                if delta_b > 12.0:
+                    temp_cast = "warm"
+                elif delta_b < -12.0:
+                    temp_cast = "cool"
+                else:
+                    temp_cast = "neutral"
+
+    # 2. Per-photo automatic corrections driven by numbers
+    auto_smoothing = round(float(np.clip(0.48 + skin_texture_score * 0.35, 0.40, 0.85)), 2)
+    auto_blemish = round(float(np.clip(0.55 + skin_texture_score * 0.35, 0.50, 0.90)), 2)
+    wb_temp_adjust = round(float(-delta_b * 25.0))
+
+    auto_corrections = {
+        "exposure_compensation_ev": ev_compensation,
+        "wb_temp_adjust_k": wb_temp_adjust,
+        "skin_smoothing": auto_smoothing,
+        "blemish_cut": auto_blemish
+    }
+
+    # 3. Crop suitability for standard 8R (4:5) and 2x2 ID
+    head_height = float(fh) * 1.25
+    head_coverage_pct = round(float(min(100.0, (head_height / max(h, 1)) * 100.0)), 1)
+    suitable_8r = bool(has_face and fy >= int(fh * 0.20) and (fy + fh * 2.2) <= h * 1.1)
+    suitable_2x2 = bool(has_face and not face_cutoff and head_coverage_pct >= 20.0)
+
+    crop_suitability = {
+        "suitable_8r": suitable_8r,
+        "suitable_2x2": suitable_2x2,
+        "head_coverage_pct": head_coverage_pct
+    }
+
+    # 4. Plain words summary for photographer UI
+    if review_needed:
+        plain_summary = f"Flagged for review: {review_reason}"
+    elif abs(ev_compensation) >= 0.20:
+        term = "underexposed" if ev_compensation > 0 else "overexposed"
+        plain_summary = f"Slightly {term}, auto-corrected {ev_compensation:+.1f} EV"
+    elif temp_cast != "neutral":
+        plain_summary = f"{temp_cast.capitalize()} tone cast detected, auto-balanced white balance"
+    elif skin_texture_score > 0.60:
+        plain_summary = f"High skin texture detected, auto-tuned smoothing ({int(auto_smoothing*100)}%)"
+    else:
+        plain_summary = "Crisp focus and balanced studio exposure"
 
     # Smile / Expression score estimation
     smile_score = 75.0
@@ -253,14 +356,14 @@ def analyze_portrait(image_input: Union[np.ndarray, str, Path]) -> Dict[str, Any
         smile_score = round(min(98.0, max(50.0, mouth_w / max(fw, 1) * 160.0)), 1)
 
     # Aftershoot-style Smart Pick selection
-    is_best_shot = bool(blink_status == 'open' and sharpness >= 72.0 and has_face and not review_needed)
+    is_best_shot = bool(eyes_open and sharpness >= 72.0 and has_face and not review_needed)
 
     # Star rating
     if is_best_shot and sharpness >= 85.0:
         stars = 5
     elif is_best_shot:
         stars = 4
-    elif blink_status == 'open':
+    elif eyes_open:
         stars = 3
     elif sharpness >= 65.0:
         stars = 2
@@ -275,10 +378,22 @@ def analyze_portrait(image_input: Union[np.ndarray, str, Path]) -> Dict[str, Any
         "face_count": face_count,
         "review_needed": review_needed,
         "review_reason": review_reason,
+        "plain_summary": plain_summary,
         "sharpness_score": sharpness,
         "sharpness_grade": "Crisp" if sharpness >= 75.0 else ("Acceptable" if sharpness >= 60.0 else "Soft"),
         "blink_status": blink_status,  # 'open' | 'blink'
+        "eyes_open": eyes_open,
         "eye_openness": eye_openness,
+        "head_tilt": roll,
+        "face_exposure": face_exposure,
+        "white_balance_cast": {
+            "temp_cast": temp_cast,
+            "delta_b": delta_b,
+            "delta_a": delta_a
+        },
+        "skin_texture_score": skin_texture_score,
+        "crop_suitability": crop_suitability,
+        "auto_corrections": auto_corrections,
         "smile_score": smile_score,
         "head_pose": {
             "roll_deg": roll,

@@ -379,7 +379,15 @@ def process_complete_workflow(
     else:
         subject_isolated = img_bgr.copy()
 
-    # 4. Skin Beautification, Melanin Radiance & Garment De-creasing
+    # 4. Smart Auto-Corrections (Exposure & Tone)
+    if analysis and "auto_corrections" in analysis:
+        auto_c = analysis["auto_corrections"]
+        ev = float(auto_c.get("exposure_compensation_ev", 0.0))
+        if abs(ev) >= 0.10:
+            factor = float(np.clip(2.0 ** (ev * 0.75), 0.70, 1.45))
+            subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
+
+    # 5. Skin Beautification, Melanin Radiance & Garment De-creasing
     if face_info is None:
         # When no face is found, skip facial steps but run studio lighting and grading
         from beautification_presets import apply_studio_environment_lighting

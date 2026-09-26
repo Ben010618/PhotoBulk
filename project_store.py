@@ -205,6 +205,7 @@ class ProjectStore:
         # Load or compute heavy features
         features = self.compute_and_cache_heavy_features(project_id, photo_id)
         face_info = features.get("face_info")
+        analysis = features.get("analysis") or {}
 
         # Load alpha matte
         alpha_path = photo_dir / "alpha.png"
@@ -248,7 +249,13 @@ class ProjectStore:
         else:
             subject_isolated = preview_bgr.copy()
 
-        # 2. Fast Beauty & Lighting
+        # 2. Smart Auto-Corrections (Exposure & Tone)
+        ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
+        if abs(ev) >= 0.10:
+            factor = float(np.clip(2.0 ** (ev * 0.75), 0.70, 1.45))
+            subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
+
+        # 3. Fast Beauty & Lighting
         preset_id = active_settings.get("preset_id", "morena_radiant")
         if preview_face_info is not None:
             enhanced_preview = apply_beauty_preset_to_image(
@@ -307,6 +314,7 @@ class ProjectStore:
         # Ensure features are computed and cached
         features = self.compute_and_cache_heavy_features(project_id, photo_id)
         face_info = features.get("face_info")
+        analysis = features.get("analysis") or {}
 
         # Load alpha mask
         alpha_path = photo_dir / "alpha.png"
@@ -331,7 +339,13 @@ class ProjectStore:
         else:
             subject_isolated = img_bgr.copy()
 
-        # 2. Beauty & Studio Lighting
+        # 2. Smart Auto-Corrections (Exposure & Tone)
+        ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
+        if abs(ev) >= 0.10:
+            factor = float(np.clip(2.0 ** (ev * 0.75), 0.70, 1.45))
+            subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
+
+        # 3. Beauty & Studio Lighting
         preset_id = active_settings.get("preset_id", "morena_radiant")
         if face_info is not None:
             enhanced_bgr = apply_beauty_preset_to_image(
