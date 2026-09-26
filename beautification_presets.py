@@ -133,7 +133,16 @@ def detect_and_heal_blemishes(
     if blemish_strength <= 0.05 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
         return img_bgr
 
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    ys, xs = np.where(skin_mask > 0)
+    if len(ys) == 0:
+        return img_bgr
+    y1, y2 = max(0, int(ys.min()) - 10), min(img_bgr.shape[0], int(ys.max()) + 10)
+    x1, x2 = max(0, int(xs.min()) - 10), min(img_bgr.shape[1], int(xs.max()) + 10)
+
+    roi_img = img_bgr[y1:y2, x1:x2]
+    roi_mask = skin_mask[y1:y2, x1:x2]
+
+    lab = cv2.cvtColor(roi_img, cv2.COLOR_BGR2LAB)
     L = lab[:, :, 0]
 
     # Black-hat transform isolates structures darker than surrounding skin
@@ -142,7 +151,7 @@ def detect_and_heal_blemishes(
 
     thresh_val = int(max(6, 16 - blemish_strength * 8))
     _, raw_spots = cv2.threshold(blackhat, thresh_val, 255, cv2.THRESH_BINARY)
-    raw_spots = cv2.bitwise_and(raw_spots, skin_mask)
+    raw_spots = cv2.bitwise_and(raw_spots, roi_mask)
 
     # Connected components analysis to filter by spot size (2 to 14 px radius) and keep moles
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(raw_spots, connectivity=8)
@@ -170,10 +179,12 @@ def detect_and_heal_blemishes(
 
     if cv2.countNonZero(heal_mask) > 0:
         heal_mask_dilated = cv2.dilate(heal_mask, np.ones((3, 3), np.uint8), iterations=1)
-        inpainted = cv2.inpaint(img_bgr, heal_mask_dilated, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+        inpainted = cv2.inpaint(roi_img, heal_mask_dilated, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
         alpha_heal = (cv2.GaussianBlur(heal_mask_dilated, (3, 3), 0).astype(np.float32) / 255.0 * blemish_strength)[:, :, None]
-        healed = inpainted.astype(np.float32) * alpha_heal + img_bgr.astype(np.float32) * (1.0 - alpha_heal)
-        return np.clip(healed, 0, 255).astype(np.uint8)
+        roi_healed = inpainted.astype(np.float32) * alpha_heal + roi_img.astype(np.float32) * (1.0 - alpha_heal)
+        out = img_bgr.copy()
+        out[y1:y2, x1:x2] = np.clip(roi_healed, 0, 255).astype(np.uint8)
+        return out
 
     return img_bgr
 
@@ -190,24 +201,38 @@ def correct_spots_and_even_skin_tone(
     if spot_correction <= 0.05 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
         return img_bgr
 
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    ys, xs = np.where(skin_mask > 0)
+    if len(ys) == 0:
+        return img_bgr
+    y1, y2 = max(0, int(ys.min()) - 15), min(img_bgr.shape[0], int(ys.max()) + 15)
+    x1, x2 = max(0, int(xs.min()) - 15), min(img_bgr.shape[1], int(xs.max()) + 15)
 
-    # Local median skin luminance and chrominance
-    median_L = cv2.medianBlur(img_bgr, 35)
+    roi_bgr = img_bgr[y1:y2, x1:x2]
+    roi_mask = skin_mask[y1:y2, x1:x2]
+
+    roi_lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+    # Local median skin luminance and chrominance on ROI
+    k_med = min(25, (min(y2 - y1, x2 - x1) // 2) * 2 + 1)
+    if k_med < 3:
+        k_med = 3
+    median_L = cv2.medianBlur(roi_bgr, k_med)
     median_lab = cv2.cvtColor(median_L, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    skin_f = (skin_mask.astype(np.float32) / 255.0)
+    skin_f = (roi_mask.astype(np.float32) / 255.0)
 
-    # 1. Gently reduce uneven dark blotches towards local median (without shifting global lightness)
-    dark_deficit = np.maximum(0.0, median_lab[:, :, 0] - lab[:, :, 0])
-    lab[:, :, 0] += dark_deficit * (spot_correction * 0.40) * skin_f
+    # 1. Gently reduce uneven dark blotches towards local median
+    dark_deficit = np.maximum(0.0, median_lab[:, :, 0] - roi_lab[:, :, 0])
+    roi_lab[:, :, 0] += dark_deficit * (spot_correction * 0.40) * skin_f
 
     # 2. Reduce blotchy redness (a* deviations) towards local median skin tone
-    a_diff = lab[:, :, 1] - median_lab[:, :, 1]
+    a_diff = roi_lab[:, :, 1] - median_lab[:, :, 1]
     red_blotch = np.maximum(0.0, a_diff)
-    lab[:, :, 1] -= red_blotch * (spot_correction * 0.45) * skin_f
+    roi_lab[:, :, 1] -= red_blotch * (spot_correction * 0.45) * skin_f
 
-    return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+    out = img_bgr.copy()
+    out[y1:y2, x1:x2] = cv2.cvtColor(np.clip(roi_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+    return out
 
 
 def whiten_dark_spots_and_hyperpigmentation(img_bgr, skin_mask, whitening_strength=0.50):
@@ -227,7 +252,16 @@ def cleanup_facial_stray_hairs(
     if strength <= 0.05 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
         return img_bgr
 
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    ys, xs = np.where(skin_mask > 0)
+    if len(ys) == 0:
+        return img_bgr
+    y1, y2 = max(0, int(ys.min()) - 10), min(img_bgr.shape[0], int(ys.max()) + 10)
+    x1, x2 = max(0, int(xs.min()) - 10), min(img_bgr.shape[1], int(xs.max()) + 10)
+
+    roi_img = img_bgr[y1:y2, x1:x2]
+    roi_mask = skin_mask[y1:y2, x1:x2]
+
+    gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
     stray_mask = np.zeros_like(gray)
     k_sizes = [(1, 9), (9, 1), (5, 5), (7, 3)]
     for (kh, kw) in k_sizes:
@@ -236,7 +270,7 @@ def cleanup_facial_stray_hairs(
         _, thresh = cv2.threshold(bh, 14, 255, cv2.THRESH_BINARY)
         stray_mask = cv2.bitwise_or(stray_mask, thresh)
 
-    stray_mask = cv2.bitwise_and(stray_mask, skin_mask)
+    stray_mask = cv2.bitwise_and(stray_mask, roi_mask)
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(stray_mask, connectivity=8)
     final_stray = np.zeros_like(gray)
     for i in range(1, num_labels):
@@ -248,9 +282,12 @@ def cleanup_facial_stray_hairs(
 
     if cv2.countNonZero(final_stray) > 0:
         inpaint_mask = cv2.dilate(final_stray, np.ones((3, 3), np.uint8), iterations=1)
-        inpainted = cv2.inpaint(img_bgr, inpaint_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+        inpainted = cv2.inpaint(roi_img, inpaint_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
         alpha = (final_stray.astype(np.float32) / 255.0 * strength)[:, :, None]
-        return np.clip(inpainted.astype(np.float32) * alpha + img_bgr.astype(np.float32) * (1.0 - alpha), 0, 255).astype(np.uint8)
+        roi_cleaned = np.clip(inpainted.astype(np.float32) * alpha + roi_img.astype(np.float32) * (1.0 - alpha), 0, 255).astype(np.uint8)
+        out = img_bgr.copy()
+        out[y1:y2, x1:x2] = roi_cleaned
+        return out
 
     return img_bgr
 
@@ -289,28 +326,41 @@ def enhance_eyes_refined(
     if eyes_mask is None or cv2.countNonZero(eyes_mask) == 0:
         return img_f
 
-    hsv = cv2.cvtColor(np.clip(img_f, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-    v = hsv[:, :, 2]
+    ys, xs = np.where(eyes_mask > 0)
+    if len(ys) == 0:
+        return img_f
+    y1, y2 = max(0, int(ys.min()) - 10), min(img_f.shape[0], int(ys.max()) + 10)
+    x1, x2 = max(0, int(xs.min()) - 10), min(img_f.shape[1], int(xs.max()) + 10)
+
+    roi_f = img_f[y1:y2, x1:x2]
+    roi_mask = eyes_mask[y1:y2, x1:x2]
+
+    roi_hsv = cv2.cvtColor(np.clip(roi_f, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+    v = roi_hsv[:, :, 2]
 
     # Sclera / eye whites: very subtle lift (max 4%), no harsh desaturation
-    sclera = (eyes_mask > 50) & (v > 130)
-    hsv[:, :, 2] = np.where(sclera, np.clip(v * 1.04, 0, 255), v)
+    sclera = (roi_mask > 50) & (v > 130)
+    roi_hsv[:, :, 2] = np.where(sclera, np.clip(v * 1.04, 0, 255), v)
 
     # Specular catchlight: gentle glint enhancement, strictly inside pupil/iris
     if catchlight_boost > 0.05:
-        glint = (eyes_mask > 50) & (v > 190)
-        hsv[:, :, 2] = np.where(glint, np.clip(v + catchlight_boost * 18.0, 0, 255), v)
+        glint = (roi_mask > 50) & (v > 190)
+        roi_hsv[:, :, 2] = np.where(glint, np.clip(v + catchlight_boost * 18.0, 0, 255), v)
 
-    enhanced = cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+    enhanced = cv2.cvtColor(np.clip(roi_hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
 
     if eye_sharpen > 0.05:
         blurred = cv2.GaussianBlur(enhanced, (0, 0), 1.5)
         sharpened = cv2.addWeighted(enhanced, 1.0 + eye_sharpen * 0.4, blurred, -eye_sharpen * 0.4, 0)
-        mask_f = (cv2.GaussianBlur(eyes_mask, (5, 5), 0).astype(np.float32) / 255.0)[:, :, None]
-        return img_f * (1.0 - mask_f) + sharpened * mask_f
+        mask_f = (cv2.GaussianBlur(roi_mask, (5, 5), 0).astype(np.float32) / 255.0)[:, :, None]
+        roi_out = roi_f * (1.0 - mask_f) + sharpened * mask_f
+    else:
+        mask_f = (roi_mask.astype(np.float32) / 255.0)[:, :, None]
+        roi_out = roi_f * (1.0 - mask_f) + enhanced * mask_f
 
-    mask_f = (eyes_mask.astype(np.float32) / 255.0)[:, :, None]
-    return img_f * (1.0 - mask_f) + enhanced * mask_f
+    out = img_f.copy()
+    out[y1:y2, x1:x2] = roi_out
+    return out
 
 
 def enhance_eye_catchlights(img_f, r_eye, l_eye, fw, eye_sharpen=0.20, catchlight_boost=0.20):
@@ -333,9 +383,18 @@ def enhance_lips_natural(
     if lips_mask is None or cv2.countNonZero(lips_mask) == 0:
         return img_f
 
-    hsv = cv2.cvtColor(np.clip(img_f, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+    ys, xs = np.where(lips_mask > 0)
+    if len(ys) == 0:
+        return img_f
+    y1, y2 = max(0, int(ys.min()) - 10), min(img_f.shape[0], int(ys.max()) + 10)
+    x1, x2 = max(0, int(xs.min()) - 10), min(img_f.shape[1], int(xs.max()) + 10)
+
+    roi_f = img_f[y1:y2, x1:x2]
+    roi_mask = lips_mask[y1:y2, x1:x2]
+
+    hsv = cv2.cvtColor(np.clip(roi_f, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
     if lip_enhancement > 0.05:
-        mask_bool = lips_mask > 50
+        mask_bool = roi_mask > 50
         hsv[:, :, 1] = np.where(mask_bool, np.clip(hsv[:, :, 1] * (1.0 + lip_enhancement * 0.22), 0, 255), hsv[:, :, 1])
 
     enhanced = cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
@@ -348,8 +407,12 @@ def enhance_lips_natural(
         tinted = np.clip(soft_light * 255.0, 0, 255)
         enhanced = enhanced * (1.0 - lip_intensity) + tinted * lip_intensity
 
-    mask_f = (cv2.GaussianBlur(lips_mask, (5, 5), 0).astype(np.float32) / 255.0)[:, :, None]
-    return img_f * (1.0 - mask_f) + enhanced * mask_f
+    mask_f = (cv2.GaussianBlur(roi_mask, (5, 5), 0).astype(np.float32) / 255.0)[:, :, None]
+    roi_out = roi_f * (1.0 - mask_f) + enhanced * mask_f
+
+    out = img_f.copy()
+    out[y1:y2, x1:x2] = roi_out
+    return out
 
 
 def recolor_lips_neural(img_f, r_mouth, l_mouth, fw, fh, lip_color_hex="#d87093", lip_intensity=0.0):
@@ -464,7 +527,8 @@ def apply_beauty_preset_to_image(
     face_info: Optional[Dict[str, Any]] = None,
     preset_id: str = "natural",
     custom_adjustments: Optional[Dict[str, Any]] = None,
-    ai_config: Optional[Dict[str, Any]] = None
+    ai_config: Optional[Dict[str, Any]] = None,
+    precomputed_masks: Optional[Dict[str, np.ndarray]] = None
 ) -> np.ndarray:
     """
     Main entry point for high-end studio portrait beautification.
@@ -487,7 +551,10 @@ def apply_beauty_preset_to_image(
         return np.clip(lit, 0, 255).astype(np.uint8)
 
     # 1. Semantic Face Parsing Masks
-    masks = get_face_parsing_masks(img_bgr, face_info)
+    if precomputed_masks:
+        masks = precomputed_masks
+    else:
+        masks = get_face_parsing_masks(img_bgr, face_info)
     skin_mask = masks["skin"]
     eyes_mask = masks["eyes"]
     lips_mask = masks["lips"]

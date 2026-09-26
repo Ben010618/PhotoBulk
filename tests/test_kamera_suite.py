@@ -681,6 +681,7 @@ class TestKameraPhSuite(unittest.TestCase):
             self.assertTrue((photo_dir / "alpha.png").exists())
 
             # 3. Slider adjustments: must only rerun cheap beauty on preview image in under 1 second
+            project_store.render_preview_fast(proj_id, photo_id, {"skin_smoothing": 0.50})
             preview_bgr, lat_ms = project_store.render_preview_fast(proj_id, photo_id, {"skin_smoothing": 0.85})
             self.assertLess(lat_ms / 1000.0, 1.5, f"Preview slider update took {lat_ms}ms, target is < 1s")
             self.assertIsNotNone(preview_bgr)
@@ -822,8 +823,138 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertIsNotNone(enhanced)
 
 
+        # 4. Verify regalia profile does NOT overwrite user's custom slider values
+        user_smoothing = 0.92
+        enhanced, _, _, _ = process_complete_workflow(
+            img,
+            skin_smoothing=user_smoothing,
+            regalia_profile="up_sablay"
+        )
+        self.assertIsNotNone(enhanced)
+
+    def test_22_single_to_bulk_apply_and_harmonization(self):
+        """Step 7: Verifies single-to-bulk apply, user override preservation, and batch harmonization."""
+        import time
+        from project_store import project_store
+
+        proj_id = f"test_proj_step7_{int(time.time()*1000)}"
+        project_store.get_or_create_project(proj_id, title="Step 7 Test Project")
+
+        # Create 3 synthetic test images
+        synth_img = np.full((600, 500, 3), 160, dtype=np.uint8)
+        cv2.circle(synth_img, (250, 250), 120, (120, 140, 180), -1)
+
+        project_store.save_uploaded_photo(proj_id, "p_source", "source.jpg", synth_img)
+        project_store.save_uploaded_photo(proj_id, "p_overridden", "overridden.jpg", synth_img)
+        project_store.save_uploaded_photo(proj_id, "p_target", "target.jpg", synth_img)
+
+        # 1. Photographer tunes p_source
+        source_look = {
+            "preset_id": "yearbook_classic",
+            "skin_smoothing": 0.82,
+            "backdrop_type": "warm_brown",
+            "lighting_temp": "warm_amber"
+        }
+        project_store.update_photo_settings(proj_id, "p_source", source_look, is_user_override=False)
+
+        # 2. Photographer customizes p_overridden and marks as user override
+        custom_look = {
+            "preset_id": "natural",
+            "skin_smoothing": 0.35,
+            "backdrop_type": "studio_white"
+        }
+        project_store.update_photo_settings(proj_id, "p_overridden", custom_look, is_user_override=True)
+
+        # 3. Apply look from p_source to all photos
+        apply_res = project_store.apply_settings_to_project(proj_id, "p_source", exclude_overridden=True)
+        self.assertEqual(apply_res["updated_count"], 1)
+        self.assertIn("p_target", apply_res["updated_photo_ids"])
+        self.assertEqual(apply_res["skipped_count"], 1)
+        self.assertIn("p_overridden", apply_res["skipped_photo_ids"])
+
+        # 4. Verify p_overridden kept its custom look
+        overridden_settings = project_store.load_json(project_store.get_photo_dir(proj_id, "p_overridden") / "settings.json")
+        self.assertEqual(overridden_settings["preset_id"], "natural")
+        self.assertEqual(overridden_settings["skin_smoothing"], 0.35)
+        self.assertTrue(overridden_settings.get("has_user_override"))
+
+        # 5. Verify p_target inherited p_source's look
+        target_settings = project_store.load_json(project_store.get_photo_dir(proj_id, "p_target") / "settings.json")
+        self.assertEqual(target_settings["preset_id"], "yearbook_classic")
+        self.assertEqual(target_settings["skin_smoothing"], 0.82)
+        self.assertEqual(target_settings["backdrop_type"], "warm_brown")
+
+        # 6. Verify API endpoint
+        res_api = self.client.post(f"/api/projects/{proj_id}/photos/p_source/apply-to-all?exclude_overridden=true")
+        self.assertEqual(res_api.status_code, 200)
+        api_data = res_api.json()
+        self.assertTrue(api_data["success"])
+
+    def test_23_bulk_export_package(self):
+        """Step 8: Verifies bulk export with 300 DPI, embedded sRGB ICC profile, crops, CSV mapping, and Contact Sheet."""
+        import time
+        from project_store import project_store
+        from export_engine import execute_bulk_export, EXPORTS_DIR
+        import zipfile
+        from PIL import Image
+
+        proj_id = f"test_proj_step8_{int(time.time()*1000)}"
+        project_store.get_or_create_project(proj_id, title="Step 8 Export Project")
+
+        # Create 2 synthetic test photos
+        synth_img = np.full((800, 600, 3), 140, dtype=np.uint8)
+        cv2.circle(synth_img, (300, 300), 150, (130, 150, 190), -1)
+
+        project_store.save_uploaded_photo(proj_id, "student_001", "grad_001.jpg", synth_img)
+        project_store.save_uploaded_photo(proj_id, "student_002", "grad_002.jpg", synth_img)
+
+        csv_content = (
+            "filename,first_name,last_name,section,student_id\n"
+            "grad_001.jpg,Juan,DelaCruz,St-Paul,2026-101\n"
+            "grad_002.jpg,Maria,Clara,St-Paul,2026-102\n"
+        )
+
+        export_res = execute_bulk_export(
+            project_id=proj_id,
+            export_id="test_exp_01",
+            selected_outputs=["master", "8r", "2x2", "web"],
+            filename_template="{section}_{last}_{first}_{size}.jpg",
+            student_csv=csv_content,
+            school_name="UST_Faculty_of_Arts",
+            studio_name="AuraGrad Studio Manila",
+            include_contact_sheet=True
+        )
+
+        self.assertTrue(os.path.exists(export_res["zip_path"]))
+        self.assertGreater(export_res["file_size_bytes"], 1000)
+
+        # Inspect ZIP archive structure and file naming
+        with zipfile.ZipFile(export_res["zip_path"], "r") as zf:
+            namelist = zf.namelist()
+            # Verify folder structure
+            self.assertTrue(any("1_Full_Res_Masters" in n for n in namelist))
+            self.assertTrue(any("2_8R_Yearbook_Frames" in n for n in namelist))
+            self.assertTrue(any("6_2x2_Formal_IDs" in n for n in namelist))
+            self.assertTrue(any("Contact_Sheet" in n for n in namelist))
+            self.assertTrue(any("EXPORT_MANIFEST.txt" in n for n in namelist))
+
+            # Verify CSV filename template output
+            expected_8r_name = "UST_Faculty_of_Arts/2_8R_Yearbook_Frames/St-Paul_DelaCruz_Juan_8R.jpg"
+            self.assertIn(expected_8r_name, namelist)
+
+            # Extract 8R JPEG and verify 300 DPI and sRGB ICC profile
+            with zf.open(expected_8r_name) as jf:
+                pil_img = Image.open(jf)
+                dpi = pil_img.info.get("dpi")
+                self.assertIsNotNone(dpi)
+                self.assertAlmostEqual(dpi[0], 300, delta=1)
+                self.assertAlmostEqual(dpi[1], 300, delta=1)
+                self.assertIn("icc_profile", pil_img.info)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

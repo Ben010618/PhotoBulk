@@ -82,6 +82,7 @@ from pipeline import (
 )
 from project_store import project_store
 from worker_pool import run_bulk_project_processing
+from export_engine import execute_bulk_export, EXPORTS_DIR
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_DIR = str(LOCAL_STORAGE_DIR)
@@ -1096,10 +1097,13 @@ def process_single_image(
 @app.post("/api/batch-upload")
 def batch_upload_endpoint(
     files: List[UploadFile] = File(...),
+    project_id: str = Form("default_project"),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """Validates, stages portrait uploads into the studio's on-disk project store, and precomputes features."""
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
+    target_project = project_id or "default_project"
+    project_store.get_or_create_project(target_project)
     results = []
 
     for idx, f in enumerate(files):
@@ -1109,16 +1113,16 @@ def batch_upload_endpoint(
         photo_id = f"batch-{int(time.time()*1000)}-{idx}"
         
         # 1. Save to persistent on-disk project folder
-        project_store.save_uploaded_photo("default_project", photo_id, f.filename, img_bgr, studio_id)
+        project_store.save_uploaded_photo(target_project, photo_id, f.filename, img_bgr, studio_id)
         
         # 2. Precompute and cache heavy features once (face landmarks & alpha matte)
-        features = project_store.compute_and_cache_heavy_features("default_project", photo_id)
+        features = project_store.compute_and_cache_heavy_features(target_project, photo_id)
         analysis = features.get("analysis", {})
         face_info = features.get("face_info")
 
         BATCH_STORE[photo_id] = {
             "id": photo_id,
-            "project_id": "default_project",
+            "project_id": target_project,
             "studio_id": studio_id,
             "filename": f.filename,
             "img_bgr": img_bgr,
@@ -1131,13 +1135,14 @@ def batch_upload_endpoint(
         results.append({
             "id": photo_id,
             "name": f.filename,
-            "previewUrl": f"/api/photos/{photo_id}/preview",
-            "originalUrl": image_to_base64_data_uri(img_bgr, quality=75),
+            "previewUrl": f"/api/projects/{target_project}/photos/{photo_id}/preview",
+            "originalUrl": f"/api/projects/{target_project}/photos/{photo_id}/original",
+            "enhancedUrl": f"/api/projects/{target_project}/photos/{photo_id}/preview",
             "analysis": analysis,
             "status": "ready"
         })
 
-    return {"uploaded_count": len(results), "items": results}
+    return {"uploaded_count": len(results), "items": results, "project_id": target_project}
 
 # =========================================================================
 # ASYNCHRONOUS BACKGROUND JOBS & BATCH WORKER
@@ -1475,6 +1480,215 @@ def stream_job_progress(job_id: str):
             time.sleep(1.0)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# =========================================================================
+# PROJECT MANAGEMENT, HARMONIZATION & BULK EXPORT
+# =========================================================================
+
+class CreateProjectRequest(BaseModel):
+    title: str
+    project_id: Optional[str] = None
+
+class PhotoSettingsRequest(BaseModel):
+    settings: Dict[str, Any]
+    is_user_override: bool = True
+
+class BulkExportRequest(BaseModel):
+    selected_outputs: List[str] = ["master", "8r", "2x2"]
+    filename_template: str = "{section}_{last}_{first}_{size}.jpg"
+    student_csv: Optional[str] = None
+    school_name: str = "Graduation Batch 2026"
+    studio_name: Optional[str] = None
+    include_contact_sheet: bool = True
+
+@app.get("/api/projects")
+def list_projects_endpoint(current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+    return {"projects": project_store.list_projects()}
+
+@app.post("/api/projects")
+def create_project_endpoint(req: CreateProjectRequest, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+    pid = req.project_id or f"proj_{uuid.uuid4().hex[:8]}"
+    project = project_store.get_or_create_project(pid, title=req.title)
+    return project
+
+@app.get("/api/projects/{project_id}")
+def get_project_details(project_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+    project = project_store.get_or_create_project(project_id)
+    photos = project_store.list_photos(project_id)
+    return {"project": project, "photos": photos, "total_photos": len(photos)}
+
+@app.get("/api/projects/{project_id}/photos")
+def list_project_photos(project_id: str, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
+    photos = project_store.list_photos(project_id)
+    return {"photos": photos, "total": len(photos)}
+
+@app.get("/api/projects/{project_id}/photos/{photo_id}/preview")
+def get_project_photo_preview(project_id: str, photo_id: str):
+    photo_dir = project_store.get_photo_dir(project_id, photo_id)
+    preview_p = photo_dir / "preview.jpg"
+    if not preview_p.exists():
+        preview_p = photo_dir / "original.jpg"
+    if not preview_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    return FileResponse(str(preview_p), media_type="image/jpeg")
+
+@app.get("/api/projects/{project_id}/photos/{photo_id}/original")
+def get_project_photo_original(project_id: str, photo_id: str):
+    orig_p = project_store.get_photo_dir(project_id, photo_id) / "original.jpg"
+    if not orig_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    return FileResponse(str(orig_p), media_type="image/jpeg")
+
+@app.post("/api/projects/{project_id}/photos/{photo_id}/settings")
+def update_photo_settings_endpoint(
+    project_id: str,
+    photo_id: str,
+    req: PhotoSettingsRequest,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    updated = project_store.update_photo_settings(
+        project_id, photo_id, req.settings, is_user_override=req.is_user_override
+    )
+    # Render preview fast so updated look is saved immediately
+    preview_bgr, lat = project_store.render_preview_fast(project_id, photo_id, custom_settings=updated)
+    return {"success": True, "settings": updated, "render_latency_ms": lat}
+
+@app.post("/api/projects/{project_id}/photos/{photo_id}/clear-override")
+def clear_photo_override_endpoint(
+    project_id: str,
+    photo_id: str,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    cleared = project_store.clear_photo_override(project_id, photo_id)
+    return {"success": True, "settings": cleared}
+
+@app.post("/api/projects/{project_id}/photos/{source_photo_id}/apply-to-all")
+def apply_look_to_all_photos(
+    project_id: str,
+    source_photo_id: str,
+    exclude_overridden: bool = Query(True),
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """
+    Applies source photo settings to all photos in the project:
+      - Respects per-photo user overrides (keeps customized portraits intact).
+      - Per-photo automatic corrections (exposure compensation and white balance) run,
+        harmonizing all portraits across differing studio light.
+    """
+    try:
+        res = project_store.apply_settings_to_project(
+            project_id=project_id,
+            source_photo_id=source_photo_id,
+            exclude_overridden=exclude_overridden
+        )
+        return {
+            "success": True,
+            **res
+        }
+    except Exception as e:
+        logger.error(f"Failed to apply look across project {project_id}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Apply to all failed: {str(e)}")
+
+@app.post("/api/projects/{project_id}/export")
+def trigger_project_export(
+    project_id: str,
+    req: BulkExportRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    """Triggers asynchronous full-resolution bulk export job."""
+    export_id = f"exp_{int(time.time()*1000)}"
+    studio_id = current_user.get("studio_id") if current_user else "default_studio"
+    studio = get_studio_state(studio_id)
+    studio_name = req.studio_name or studio.get("studio_name", "AuraGrad Creative Studio")
+
+    photos = project_store.list_photos(project_id)
+    if not photos:
+        raise HTTPException(status_code=400, detail="Cannot export an empty project")
+
+    ACTIVE_JOBS[export_id] = {
+        "job_id": export_id,
+        "project_id": project_id,
+        "status": "processing",
+        "progress": 0,
+        "total": len(photos),
+        "processed": 0,
+        "message": "Initializing export pipeline...",
+        "result": None,
+        "error": None
+    }
+
+    def _export_worker():
+        try:
+            def _prog(processed, total, msg):
+                pct = int((processed / max(total, 1)) * 95)
+                if export_id in ACTIVE_JOBS:
+                    ACTIVE_JOBS[export_id]["progress"] = pct
+                    ACTIVE_JOBS[export_id]["processed"] = processed
+                    ACTIVE_JOBS[export_id]["message"] = msg
+
+            res = execute_bulk_export(
+                project_id=project_id,
+                export_id=export_id,
+                selected_outputs=req.selected_outputs,
+                filename_template=req.filename_template,
+                student_csv=req.student_csv,
+                school_name=req.school_name,
+                studio_name=studio_name,
+                include_contact_sheet=req.include_contact_sheet,
+                progress_callback=_prog
+            )
+
+            ACTIVE_JOBS[export_id]["status"] = "completed"
+            ACTIVE_JOBS[export_id]["progress"] = 100
+            ACTIVE_JOBS[export_id]["message"] = "Export package ready"
+            ACTIVE_JOBS[export_id]["result"] = res
+        except Exception as exc:
+            logger.error(f"Bulk export error: {exc}\n{traceback.format_exc()}")
+            ACTIVE_JOBS[export_id]["status"] = "failed"
+            ACTIVE_JOBS[export_id]["message"] = str(exc)
+            ACTIVE_JOBS[export_id]["error"] = str(exc)
+
+    background_tasks.add_task(_export_worker)
+    return {
+        "job_id": export_id,
+        "status": "queued",
+        "message": f"Export job started for {len(photos)} portraits."
+    }
+
+@app.get("/api/projects/{project_id}/exports/{export_id}/status")
+def get_export_status(project_id: str, export_id: str):
+    job = ACTIVE_JOBS.get(export_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    return job
+
+@app.get("/api/projects/{project_id}/exports/{export_id}/download")
+def download_export_zip(
+    project_id: str,
+    export_id: str,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    job = ACTIVE_JOBS.get(export_id)
+    zip_path = None
+    if job and job.get("result"):
+        zip_path = Path(job["result"]["zip_path"])
+
+    if not zip_path or not zip_path.exists():
+        candidates = list(EXPORTS_DIR.glob(f"*{export_id}.zip"))
+        if candidates:
+            zip_path = candidates[0]
+
+    if not zip_path or not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Export package not found or still processing")
+
+    return FileResponse(
+        str(zip_path),
+        media_type="application/zip",
+        filename=zip_path.name,
+        headers={"Content-Disposition": f'attachment; filename="{zip_path.name}"'}
+    )
 
 
 # =========================================================================

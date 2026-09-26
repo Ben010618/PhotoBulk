@@ -97,7 +97,8 @@ class ProjectStore:
             "studio_light_intensity": 0.20,
             "rim_light_boost": 0.20,
             "bg_replacement_enabled": True,
-            "backdrop_type": "royal_navy"
+            "backdrop_type": "royal_navy",
+            "has_user_override": False
         }
         self.save_json(photo_dir / "settings.json", settings)
 
@@ -113,7 +114,8 @@ class ProjectStore:
             "preview_height": ph,
             "scale": scale,
             "created_at": time.time(),
-            "status": "staged"
+            "status": "staged",
+            "has_user_override": False
         }
         self.save_json(photo_dir / "meta.json", meta)
         return meta
@@ -129,9 +131,10 @@ class ProjectStore:
         face_path = photo_dir / "face.json"
         analysis_path = photo_dir / "analysis.json"
         alpha_path = photo_dir / "alpha.png"
+        masks_path = photo_dir / "masks.npz"
 
         # Check if already cached
-        if face_path.exists() and analysis_path.exists() and alpha_path.exists():
+        if face_path.exists() and analysis_path.exists() and alpha_path.exists() and masks_path.exists():
             face_info = self.load_json(face_path)
             analysis = self.load_json(analysis_path)
             return {"face_info": face_info, "analysis": analysis, "cached": True}
@@ -162,6 +165,30 @@ class ProjectStore:
         # 2. Subject Alpha Matte
         alpha_mask = get_subject_mask(img_bgr, face_info)
         cv2.imwrite(str(alpha_path), alpha_mask)
+
+        # 3. Face Parsing Masks (cached to disk for instant interactive slider response)
+        masks_path = photo_dir / "masks.npz"
+        if not masks_path.exists() and face_info is not None:
+            try:
+                from face_parsing import get_face_parsing_masks
+                masks = get_face_parsing_masks(img_bgr, face_info)
+                np.savez_compressed(str(masks_path), **masks)
+            except Exception as e:
+                logger.warning(f"Notice precomputing masks for {photo_id}: {e}")
+
+        # 4. Precompute edge-decontaminated preview for sub-second compositing
+        clean_p = photo_dir / "preview_clean.jpg"
+        preview_p = photo_dir / "preview.jpg"
+        if not clean_p.exists() and preview_p.exists():
+            try:
+                p_bgr = cv2.imread(str(preview_p))
+                if p_bgr is not None:
+                    p_alpha = cv2.resize(alpha_mask, (p_bgr.shape[1], p_bgr.shape[0]))
+                    from background_engine import decontaminate_edges
+                    clean_bgr = decontaminate_edges(p_bgr, p_alpha)
+                    cv2.imwrite(str(clean_p), clean_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            except Exception as e:
+                logger.warning(f"Notice precomputing decontaminated preview for {photo_id}: {e}")
 
         # Update meta status
         meta_path = photo_dir / "meta.json"
@@ -241,19 +268,53 @@ class ProjectStore:
         backdrop_mode = active_settings.get("backdrop_mode", "replace" if bg_replacement else "keep")
         backdrop_type = active_settings.get("backdrop_type", "classic_blue")
 
+        # Check for precomputed clean preview to skip heavy edge decontamination during interactive slider updates
+        clean_preview_p = photo_dir / "preview_clean.jpg"
+        if clean_preview_p.exists():
+            clean_subj_bgr = cv2.imread(str(clean_preview_p))
+            decontam_needed = False
+        else:
+            clean_subj_bgr = preview_bgr
+            decontam_needed = True
+
         if backdrop_mode == "clean":
-            subject_isolated = clean_original_backdrop(preview_bgr, alpha_preview)
+            subject_isolated = clean_original_backdrop(clean_subj_bgr, alpha_preview)
         elif backdrop_mode == "replace":
             backdrop = generate_studio_backdrop(pw, ph, backdrop_type=backdrop_type, face_info=preview_face_info)
-            subject_isolated = composite_subject_onto_backdrop(preview_bgr, alpha_preview, backdrop)
+            subject_isolated = composite_subject_onto_backdrop(clean_subj_bgr, alpha_preview, backdrop, decontaminate=decontam_needed)
         else:
             subject_isolated = preview_bgr.copy()
 
-        # 2. Smart Auto-Corrections (Exposure & Tone)
+        # 2. Smart Auto-Corrections (Batch Harmonization: Exposure & White Balance)
         ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
         if abs(ev) >= 0.10:
             factor = float(np.clip(2.0 ** (ev * 0.75), 0.70, 1.45))
             subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
+
+        # Auto White-Balance Harmonization
+        wb_cast = analysis.get("white_balance_cast") or {}
+        delta_b = float(wb_cast.get("delta_b", 0.0))
+        if abs(delta_b) >= 2.0:
+            lab = cv2.cvtColor(subject_isolated, cv2.COLOR_BGR2LAB).astype(np.float32)
+            b_shift = float(np.clip(-delta_b * 0.75, -25.0, 25.0))
+            lab[:, :, 2] = np.clip(lab[:, :, 2] + b_shift, 0.0, 255.0)
+            subject_isolated = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+        # Load cached face parsing masks (scaled to preview)
+        masks_path = photo_dir / "masks.npz"
+        preview_masks = None
+        if masks_path.exists():
+            try:
+                npz = np.load(str(masks_path))
+                preview_masks = {}
+                for k in npz.files:
+                    m = npz[k]
+                    if m.shape[:2] != (ph, pw):
+                        preview_masks[k] = cv2.resize(m, (pw, ph), interpolation=cv2.INTER_NEAREST)
+                    else:
+                        preview_masks[k] = m
+            except Exception as e:
+                logger.warning(f"Notice loading masks.npz for {photo_id}: {e}")
 
         # 3. Fast Beauty & Lighting
         preset_id = active_settings.get("preset_id", "morena_radiant")
@@ -262,7 +323,8 @@ class ProjectStore:
                 subject_isolated,
                 face_info=preview_face_info,
                 preset_id=preset_id,
-                custom_adjustments=active_settings
+                custom_adjustments=active_settings,
+                precomputed_masks=preview_masks
             )
         else:
             # Skip facial steps, execute studio lighting
@@ -339,11 +401,36 @@ class ProjectStore:
         else:
             subject_isolated = img_bgr.copy()
 
-        # 2. Smart Auto-Corrections (Exposure & Tone)
+        # 2. Smart Auto-Corrections (Exposure & Tone & WB Harmonization)
         ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
         if abs(ev) >= 0.10:
             factor = float(np.clip(2.0 ** (ev * 0.75), 0.70, 1.45))
             subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
+
+        # Auto White-Balance Harmonization
+        wb_cast = analysis.get("white_balance_cast") or {}
+        delta_b = float(wb_cast.get("delta_b", 0.0))
+        if abs(delta_b) >= 2.0:
+            lab = cv2.cvtColor(subject_isolated, cv2.COLOR_BGR2LAB).astype(np.float32)
+            b_shift = float(np.clip(-delta_b * 0.75, -25.0, 25.0))
+            lab[:, :, 2] = np.clip(lab[:, :, 2] + b_shift, 0.0, 255.0)
+            subject_isolated = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+        # Load cached face parsing masks (scaled to full resolution)
+        masks_path = photo_dir / "masks.npz"
+        full_masks = None
+        if masks_path.exists():
+            try:
+                npz = np.load(str(masks_path))
+                full_masks = {}
+                for k in npz.files:
+                    m = npz[k]
+                    if m.shape[:2] != (h, w):
+                        full_masks[k] = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+                    else:
+                        full_masks[k] = m
+            except Exception as e:
+                logger.warning(f"Notice loading full masks.npz for {photo_id}: {e}")
 
         # 3. Beauty & Studio Lighting
         preset_id = active_settings.get("preset_id", "morena_radiant")
@@ -352,7 +439,8 @@ class ProjectStore:
                 subject_isolated,
                 face_info=face_info,
                 preset_id=preset_id,
-                custom_adjustments=active_settings
+                custom_adjustments=active_settings,
+                precomputed_masks=full_masks
             )
         else:
             lighting_temp = active_settings.get("lighting_temp", "neutral_5500k")
@@ -390,6 +478,125 @@ class ProjectStore:
             "height": h
         }
 
+    def update_photo_settings(
+        self,
+        project_id: str,
+        photo_id: str,
+        settings: Dict[str, Any],
+        is_user_override: bool = True
+    ) -> Dict[str, Any]:
+        """Saves custom settings for a specific photo and marks it as user-overridden."""
+        photo_dir = self.get_photo_dir(project_id, photo_id)
+        current = self.load_json(photo_dir / "settings.json") or {}
+        updated = {**current, **settings, "has_user_override": is_user_override}
+        self.save_json(photo_dir / "settings.json", updated)
+
+        meta = self.load_json(photo_dir / "meta.json") or {}
+        meta["has_user_override"] = is_user_override
+        self.save_json(photo_dir / "meta.json", meta)
+        return updated
+
+    def clear_photo_override(self, project_id: str, photo_id: str) -> Dict[str, Any]:
+        """Clears user override on a photo so it inherits project-wide looks."""
+        return self.update_photo_settings(project_id, photo_id, {}, is_user_override=False)
+
+    def apply_settings_to_project(
+        self,
+        project_id: str,
+        source_photo_id: str,
+        exclude_overridden: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Single to Bulk Apply:
+        - Copies settings from source photo to every other photo in the project.
+        - Preserves per-photo custom overrides if exclude_overridden is True.
+        - Triggers fast preview re-renders so per-photo automatic corrections
+          (exposure compensation, white balance) harmonize the entire gallery.
+        """
+        source_dir = self.get_photo_dir(project_id, source_photo_id)
+        source_settings = self.load_json(source_dir / "settings.json")
+        if not source_settings:
+            raise FileNotFoundError(f"Source settings not found for photo {source_photo_id}")
+
+        # Remove local override flag from look template
+        template = dict(source_settings)
+        template["has_user_override"] = False
+
+        project_dir = self.get_project_dir(project_id)
+        updated_photos: List[str] = []
+        skipped_photos: List[str] = []
+
+        for p_dir in project_dir.iterdir():
+            if not p_dir.is_dir() or not (p_dir / "original.jpg").exists():
+                continue
+            pid = p_dir.name
+            if pid == source_photo_id:
+                continue
+
+            target_settings = self.load_json(p_dir / "settings.json") or {}
+            target_meta = self.load_json(p_dir / "meta.json") or {}
+
+            is_overridden = bool(
+                target_settings.get("has_user_override", False) or
+                target_meta.get("has_user_override", False)
+            )
+
+            if exclude_overridden and is_overridden:
+                skipped_photos.append(pid)
+                continue
+
+            # Apply shared look settings to target photo
+            merged = {**target_settings, **template, "has_user_override": False}
+            self.save_json(p_dir / "settings.json", merged)
+
+            # Re-render preview with per-photo auto-harmonization
+            try:
+                self.render_preview_fast(project_id, pid, custom_settings=merged)
+            except Exception as e:
+                logger.warning(f"Preview re-render notice for {pid}: {e}")
+
+            updated_photos.append(pid)
+
+        return {
+            "project_id": project_id,
+            "source_photo_id": source_photo_id,
+            "updated_count": len(updated_photos),
+            "skipped_count": len(skipped_photos),
+            "updated_photo_ids": updated_photos,
+            "skipped_photo_ids": skipped_photos
+        }
+
+    def list_projects(self) -> List[Dict[str, Any]]:
+        """Lists all existing projects in store."""
+        if not self.base_dir.exists():
+            return []
+        projects = []
+        for p_dir in self.base_dir.iterdir():
+            if p_dir.is_dir():
+                photos = self.list_photos(p_dir.name)
+                project_meta = self.load_json(p_dir / "project.json") or {}
+                projects.append({
+                    "id": p_dir.name,
+                    "title": project_meta.get("title", p_dir.name.replace("_", " ").title()),
+                    "photo_count": len(photos),
+                    "created_at": project_meta.get("created_at", time.time())
+                })
+        return projects
+
+    def get_or_create_project(self, project_id: str, title: Optional[str] = None) -> Dict[str, Any]:
+        """Gets or creates project directory with metadata."""
+        p_dir = self.get_project_dir(project_id)
+        meta_file = p_dir / "project.json"
+        meta = self.load_json(meta_file)
+        if not meta:
+            meta = {
+                "id": project_id,
+                "title": title or project_id.replace("_", " ").title(),
+                "created_at": time.time()
+            }
+            self.save_json(meta_file, meta)
+        return meta
+
     def list_photos(self, project_id: str = "default_project") -> List[Dict[str, Any]]:
         """Lists all photo records for a given project from disk."""
         project_dir = self.get_project_dir(project_id)
@@ -405,6 +612,7 @@ class ProjectStore:
                     "filename": meta.get("filename", f"{p.name}.jpg"),
                     "status": meta.get("status", "ready"),
                     "has_face": meta.get("has_face", False),
+                    "has_user_override": bool(settings.get("has_user_override", False) or meta.get("has_user_override", False)),
                     "review_needed": analysis.get("review_needed", False),
                     "review_reason": analysis.get("review_reason"),
                     "preview_url": f"/api/projects/{project_id}/photos/{p.name}/preview",
