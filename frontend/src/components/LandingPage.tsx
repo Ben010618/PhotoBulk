@@ -108,7 +108,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
             <div className="p-3 rounded border border-[#30363d] bg-[#161b22]">
               <div className="text-xs font-mono text-[#8b949e]">BATCH THROUGHPUT</div>
               <div className="text-xl font-bold text-[#f0f6fc] font-mono mt-0.5">&gt; 1,200 / hr</div>
-              <div className="text-[11px] text-[#8b949e] mt-1">Nvidia A10G Cloud Fleet</div>
+              <div className="text-[11px] text-[#8b949e] mt-1">High-Speed Vision Pipeline</div>
             </div>
             <div className="p-3 rounded border border-[#30363d] bg-[#161b22]">
               <div className="text-xs font-mono text-[#8b949e]">EDGE MATTING</div>
@@ -427,7 +427,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
               </li>
               <li className="flex items-center gap-2">
                 <CheckCircle2 className="w-3.5 h-3.5 text-[#f0f6fc]" />
-                <span>Dedicated Nvidia A10G Cluster</span>
+                <span>Dedicated High-Throughput Cluster</span>
               </li>
               <li className="flex items-center gap-2">
                 <CheckCircle2 className="w-3.5 h-3.5 text-[#f0f6fc]" />

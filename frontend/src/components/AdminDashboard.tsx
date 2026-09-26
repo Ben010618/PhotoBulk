@@ -210,7 +210,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate, curr
       studio: 'Lumina Portraits',
       model: 'BiRefNet-HR + MorenaRetouch',
       batchSize: 180,
-      latencyMs: 245,
+      latencyMs: 280,
       status: 'COMPLETED',
       time: '15:08:42',
     },
@@ -335,11 +335,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate, curr
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-4 rounded-lg border border-[#30363d] bg-[#161b22] space-y-1">
           <div className="flex items-center justify-between text-xs text-[#8b949e] font-mono">
-            <span>ACTIVE GPU FLEET</span>
+            <span>ACTIVE ML ENGINE</span>
             <Server className="w-4 h-4 text-[#8b949e]" />
           </div>
-          <div className="text-2xl font-bold font-mono text-[#f0f6fc]">8x Nvidia A10G</div>
-          <div className="text-[11px] text-[#8b949e]">Auto-scaling &bull; 0 node backlog</div>
+          <div className="text-2xl font-bold font-mono text-[#f0f6fc]">Production ML Cluster</div>
+          <div className="text-[11px] text-[#8b949e]">Modal Cloud GPU &amp; Local Fallback</div>
         </div>
 
         <div className="p-4 rounded-lg border border-[#30363d] bg-[#161b22] space-y-1">
@@ -507,7 +507,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate, curr
         {activeTab === 'queue' && (
           <div className="rounded-lg border border-[#30363d] bg-[#161b22] overflow-hidden">
             <div className="p-3 bg-[#0d1117] border-b border-[#30363d] flex items-center justify-between text-xs">
-              <span className="font-mono text-[#8b949e]">Nvidia A10G Inference Queue Stream</span>
+              <span className="font-mono text-[#8b949e]">ML Vision Pipeline Inference Queue</span>
               <button
                 onClick={() => {}}
                 className="flex items-center gap-1 text-[11px] font-mono text-[#8b949e] hover:text-[#f0f6fc]"

@@ -32,7 +32,6 @@ from auth import create_access_token
 from analyzer_engine import analyze_portrait, get_face_detector
 from beautification_presets import apply_beauty_preset_to_image, BEAUTY_PRESETS, LIP_COLOR_PALETTES
 from background_engine import generate_studio_backdrop, composite_subject_onto_backdrop, STUDIO_BACKDROPS
-from watermark_engine import generate_watermarked_proof
 from payment_engine import payment_engine
 from r2_storage import storage
 from regalia_profiles import REGALIA_PROFILES
@@ -42,7 +41,8 @@ from pipeline import (
     crop_8r_aspect,
     crop_2x2_id,
     get_subject_mask,
-    detect_actual_engine
+    detect_actual_engine,
+    generate_watermarked_proof
 )
 from api_server import app, BATCH_STORE, sanitize_filename_or_folder, deduct_studio_credit, get_studio_state
 

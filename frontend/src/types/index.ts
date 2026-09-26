@@ -42,6 +42,8 @@ export interface PhotoItem {
   masterUrl?: string;
   status: 'pending' | 'processing' | 'ready' | 'done';
   analysis?: PhotoAnalysis;
+  latency_ms?: number;
+  engine_used?: string;
 }
 
 export interface BackdropPreset {

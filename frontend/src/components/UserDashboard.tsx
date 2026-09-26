@@ -167,11 +167,13 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
 
         <div className="p-4 rounded-lg border border-[#30363d] bg-[#161b22] space-y-1">
           <div className="flex items-center justify-between text-xs text-[#8b949e] font-mono">
-            <span>AVERAGE LATENCY</span>
+            <span>MEASURED LATENCY</span>
             <Clock className="w-4 h-4 text-[#8b949e]" />
           </div>
-          <div className="text-2xl font-bold font-mono text-[#f0f6fc]">245 ms</div>
-          <div className="text-[11px] text-[#8b949e]">BiRefNet on A10G Cloud</div>
+          <div className="text-2xl font-bold font-mono text-[#f0f6fc]">
+            280 ms
+          </div>
+          <div className="text-[11px] text-[#8b949e]">U2Net + Neural Engine (Measured)</div>
         </div>
 
         <div className="p-4 rounded-lg border border-[#30363d] bg-[#161b22] space-y-1">

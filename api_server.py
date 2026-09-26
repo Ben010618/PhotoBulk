@@ -68,7 +68,6 @@ from beautification_presets import BEAUTY_PRESETS, LIP_COLOR_PALETTES
 from analyzer_engine import analyze_portrait
 from regalia_profiles import REGALIA_PROFILES
 from pdf_engine import generate_contact_sheet_pdf, generate_lab_gang_sheet_pdf, generate_batch_lab_gang_sheet_pdf
-from watermark_engine import generate_watermarked_proof
 from pipeline import (
     process_image,
     ProcessingParams,
@@ -77,7 +76,8 @@ from pipeline import (
     crop_8r_aspect,
     crop_2x2_id,
     get_subject_mask,
-    detect_actual_engine
+    detect_actual_engine,
+    generate_watermarked_proof
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1115,7 +1115,7 @@ async def batch_process_endpoint(
     studio = get_studio_state(studio_id)
 
     # Filter photos for current studio
-    target_items = [p for p in BATCH_STORE.values() if p.get("studio_id") == studio_id or studio_id == "default_studio"]
+    target_items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
     needed_credits = len(target_items)
 
     if needed_credits > 0 and studio["credit_balance"] < needed_credits:
@@ -1209,7 +1209,7 @@ async def start_background_batch_job(
 ):
     """Direct convenience endpoint for spawning background batch processing."""
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
-    target_items = [p for p in BATCH_STORE.values() if p.get("studio_id") == studio_id or studio_id == "default_studio"]
+    target_items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
 
     job_id = f"job-{uuid.uuid4().hex[:12]}"
     now = time.time()
@@ -1269,7 +1269,7 @@ def export_pdf_contact_sheet(
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
     studio = get_studio_state(studio_id)
 
-    items = [p for p in BATCH_STORE.values() if p.get("studio_id") == studio_id or studio_id == "default_studio"]
+    items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
 
     with tempfile.TemporaryDirectory() as temp_dir:
         photos_data = []
@@ -1309,7 +1309,7 @@ def export_pdf_gang_sheet(
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
     studio = get_studio_state(studio_id)
 
-    items = [p for p in BATCH_STORE.values() if p.get("studio_id") == studio_id or studio_id == "default_studio"]
+    items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
 
     with tempfile.TemporaryDirectory() as temp_dir:
         students_data = []
@@ -1376,7 +1376,7 @@ def export_batch_zip(
     studio = get_studio_state(studio_id)
 
     # Multi-tenant isolation: only export current studio's items
-    items_to_export = [p for p in BATCH_STORE.values() if p.get("studio_id") == studio_id or studio_id == "default_studio"]
+    items_to_export = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
 
     zip_buffer = io.BytesIO()
 
