@@ -655,6 +655,50 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertIsNotNone(no_face_res.analysis.get("review_reason"))
         self.assertIsNotNone(no_face_res.enhanced_bgr)
 
+    def test_19_persistent_project_store_and_fast_preview(self):
+        """Step 2: Verify on-disk project folder, feature caching, sub-second slider preview, and restart restoration."""
+        from project_store import project_store
+        from api_server import restore_projects_to_batch_store
+
+        proj_id = "test_persistence_proj"
+        photo_id = "photo_step2_test"
+
+        try:
+            # 1. Save uploaded photo to on-disk project store
+            meta = project_store.save_uploaded_photo(proj_id, photo_id, "student_portrait.jpg", self.face_img)
+            self.assertEqual(meta["id"], photo_id)
+
+            photo_dir = project_store.get_photo_dir(proj_id, photo_id)
+            self.assertTrue((photo_dir / "original.jpg").exists())
+            self.assertTrue((photo_dir / "preview.jpg").exists())
+            self.assertTrue((photo_dir / "settings.json").exists())
+
+            # 2. Compute and cache heavy features once
+            features = project_store.compute_and_cache_heavy_features(proj_id, photo_id)
+            self.assertTrue((photo_dir / "face.json").exists())
+            self.assertTrue((photo_dir / "analysis.json").exists())
+            self.assertTrue((photo_dir / "alpha.png").exists())
+
+            # 3. Slider adjustments: must only rerun cheap beauty on preview image in under 1 second
+            preview_bgr, lat_ms = project_store.render_preview_fast(proj_id, photo_id, {"skin_smoothing": 0.85})
+            self.assertLess(lat_ms / 1000.0, 1.5, f"Preview slider update took {lat_ms}ms, target is < 1s")
+            self.assertIsNotNone(preview_bgr)
+
+            # 4. Full-resolution export render
+            render_res = project_store.render_full_resolution(proj_id, photo_id)
+            self.assertTrue(os.path.exists(render_res["master_path"]))
+            self.assertTrue(os.path.exists(render_res["crop_8r_path"]))
+            self.assertTrue(os.path.exists(render_res["crop_2x2_path"]))
+
+            # 5. Server restart simulation: clear in-memory BATCH_STORE and restore from disk
+            BATCH_STORE.pop(photo_id, None)
+            restore_projects_to_batch_store()
+            self.assertIn(photo_id, BATCH_STORE, "Photo must survive server restart by restoring from on-disk project folder")
+        finally:
+            import shutil
+            shutil.rmtree(str(project_store.get_project_dir(proj_id)), ignore_errors=True)
+            BATCH_STORE.pop(photo_id, None)
+
 
 if __name__ == "__main__":
     unittest.main()

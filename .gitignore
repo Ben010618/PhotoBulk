@@ -50,6 +50,8 @@ temp_exports/
 uploads/
 storage/
 local_storage/
+local_data/
+data/
 demo_output/
 output/
 

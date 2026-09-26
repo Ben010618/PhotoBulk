@@ -80,6 +80,8 @@ from pipeline import (
     detect_actual_engine,
     generate_watermarked_proof
 )
+from project_store import project_store
+from worker_pool import run_bulk_project_processing
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_DIR = str(LOCAL_STORAGE_DIR)
@@ -178,6 +180,49 @@ AI_CONFIG = {
 _GEMINI_VISION_CACHE: Dict[str, Any] = {}
 BATCH_STORE: Dict[str, Dict[str, Any]] = {}
 ACTIVE_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+def restore_projects_to_batch_store():
+    """Restores persisted photos from on-disk project directories into active BATCH_STORE."""
+    try:
+        if not project_store.base_dir.exists():
+            return
+        restored = 0
+        for p_dir in project_store.base_dir.iterdir():
+            if not p_dir.is_dir():
+                continue
+            project_id = p_dir.name
+            for photo_dir in p_dir.iterdir():
+                if not photo_dir.is_dir():
+                    continue
+                orig_path = photo_dir / "original.jpg"
+                if orig_path.exists():
+                    pid = photo_dir.name
+                    if pid not in BATCH_STORE:
+                        img = cv2.imread(str(orig_path))
+                        if img is not None:
+                            meta = project_store.load_json(photo_dir / "meta.json") or {}
+                            analysis = project_store.load_json(photo_dir / "analysis.json") or {}
+                            face_info = project_store.load_json(photo_dir / "face.json")
+                            BATCH_STORE[pid] = {
+                                "id": pid,
+                                "project_id": project_id,
+                                "studio_id": meta.get("studio_id", "default_studio"),
+                                "filename": meta.get("filename", f"{pid}.jpg"),
+                                "img_bgr": img,
+                                "enhanced_bgr": img,
+                                "face_info": face_info,
+                                "analysis": analysis,
+                                "status": meta.get("status", "ready")
+                            }
+                            restored += 1
+        if restored > 0:
+            logger.info(f"[api_server] Restored {restored} persistent photos from on-disk project store.")
+    except Exception as e:
+        logger.warning(f"[api_server] Notice restoring projects: {e}")
+
+
+restore_projects_to_batch_store()
 
 # Upload constraints
 MAX_UPLOAD_SIZE = int(os.environ.get("MAX_UPLOAD_SIZE_MB", 25)) * 1024 * 1024  # 25 MB
@@ -465,9 +510,9 @@ def get_regalia_profiles_endpoint():
 
 
 @app.post("/api/analyze-photo")
-async def analyze_photo_endpoint(file: UploadFile = File(...)):
+def analyze_photo_endpoint(file: UploadFile = File(...)):
     """Runs Aftershoot-style AI culling and quality metrics with multi-face detection."""
-    contents = await file.read()
+    contents = file.file.read()
     img_bgr = validate_image_upload(contents, file.filename, file.content_type)
     analysis = analyze_portrait(img_bgr)
     return analysis
@@ -792,17 +837,68 @@ async def register_photo_endpoint(
 # =========================================================================
 
 @app.get("/api/photos/{photo_id}/preview")
-def get_photo_preview(photo_id: str):
-    """Returns lightweight 800px preview image."""
+def get_photo_preview(
+    photo_id: str,
+    skin_smoothing: Optional[float] = Query(None),
+    blemish_cut: Optional[float] = Query(None),
+    dark_spot_whitening: Optional[float] = Query(None),
+    shine_reduction: Optional[float] = Query(None),
+    glow_intensity: Optional[float] = Query(None),
+    eye_catchlight: Optional[float] = Query(None),
+    teeth_whitening: Optional[float] = Query(None),
+    preset_id: Optional[str] = Query(None),
+    backdrop_type: Optional[str] = Query(None)
+):
+    """
+    Returns high-speed preview image (<1s response).
+    When sliders are modified, re-renders only cheap beauty and lighting on preview.jpg.
+    """
+    custom = {}
+    if skin_smoothing is not None: custom["skin_smoothing"] = skin_smoothing
+    if blemish_cut is not None: custom["blemish_cut"] = blemish_cut
+    if dark_spot_whitening is not None: custom["dark_spot_whitening"] = dark_spot_whitening
+    if shine_reduction is not None: custom["shine_reduction"] = shine_reduction
+    if glow_intensity is not None: custom["glow_intensity"] = glow_intensity
+    if eye_catchlight is not None: custom["eye_catchlight"] = eye_catchlight
+    if teeth_whitening is not None: custom["teeth_whitening"] = teeth_whitening
+    if preset_id is not None: custom["preset_id"] = preset_id
+    if backdrop_type is not None: custom["backdrop_type"] = backdrop_type
+
+    photo_dir = project_store.get_photo_dir("default_project", photo_id)
+    if photo_dir.exists() and (photo_dir / "original.jpg").exists():
+        if custom:
+            preview_bgr, _ = project_store.render_preview_fast("default_project", photo_id, custom_settings=custom)
+            _, buf = cv2.imencode(".jpg", preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+            return Response(content=buf.tobytes(), media_type="image/jpeg")
+        elif (photo_dir / "preview.jpg").exists():
+            return FileResponse(str(photo_dir / "preview.jpg"), media_type="image/jpeg")
+
     item = BATCH_STORE.get(photo_id)
     if not item:
         raise HTTPException(status_code=404, detail="Photo not found")
     
     img = item.get("enhanced_bgr", item["img_bgr"])
     h, w = img.shape[:2]
-    scale = 800.0 / max(h, w)
+    scale = 1600.0 / max(h, w)
     thumb = cv2.resize(img, (int(w * scale), int(h * scale))) if scale < 1.0 else img
-    _, buf = cv2.imencode(".jpg", thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    _, buf = cv2.imencode(".jpg", thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+
+@app.post("/api/photos/{photo_id}/preview")
+def post_photo_preview_tune(photo_id: str, settings: Dict[str, Any]):
+    """Reruns cheap beauty and lighting steps on ~1600px preview image with sub-second response."""
+    photo_dir = project_store.get_photo_dir("default_project", photo_id)
+    if photo_dir.exists() and (photo_dir / "original.jpg").exists():
+        preview_bgr, lat = project_store.render_preview_fast("default_project", photo_id, custom_settings=settings)
+        _, buf = cv2.imencode(".jpg", preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"X-Render-Latency-Ms": str(lat)})
+
+    item = BATCH_STORE.get(photo_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    img = item.get("enhanced_bgr", item["img_bgr"])
+    _, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 
@@ -870,7 +966,7 @@ def verify_student_proof(student_id: str):
 # =========================================================================
 
 @app.post("/api/process-image")
-async def process_single_image(
+def process_single_image(
     file: UploadFile = File(None),
     photo_id: str = Form(None),
     bg_replacement_enabled: bool = Form(True),
@@ -907,7 +1003,7 @@ async def process_single_image(
         img_bgr = BATCH_STORE[photo_id]["img_bgr"]
         filename = BATCH_STORE[photo_id]["filename"]
     elif file:
-        contents = await file.read()
+        contents = file.file.read()
         img_bgr = validate_image_upload(contents, file.filename, file.content_type)
         filename = file.filename
     elif BATCH_STORE:
@@ -998,28 +1094,36 @@ async def process_single_image(
 
 
 @app.post("/api/batch-upload")
-async def batch_upload_endpoint(
+def batch_upload_endpoint(
     files: List[UploadFile] = File(...),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
-    """Validates and stages portrait uploads into the studio's isolated batch store."""
+    """Validates, stages portrait uploads into the studio's on-disk project store, and precomputes features."""
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
     results = []
 
     for idx, f in enumerate(files):
-        contents = await f.read()
+        contents = f.file.read()
         img_bgr = validate_image_upload(contents, f.filename, f.content_type)
         
         photo_id = f"batch-{int(time.time()*1000)}-{idx}"
-        analysis = analyze_portrait(img_bgr)
         
+        # 1. Save to persistent on-disk project folder
+        project_store.save_uploaded_photo("default_project", photo_id, f.filename, img_bgr, studio_id)
+        
+        # 2. Precompute and cache heavy features once (face landmarks & alpha matte)
+        features = project_store.compute_and_cache_heavy_features("default_project", photo_id)
+        analysis = features.get("analysis", {})
+        face_info = features.get("face_info")
+
         BATCH_STORE[photo_id] = {
             "id": photo_id,
+            "project_id": "default_project",
             "studio_id": studio_id,
             "filename": f.filename,
             "img_bgr": img_bgr,
             "enhanced_bgr": img_bgr,
-            "face_info": None,
+            "face_info": face_info,
             "analysis": analysis,
             "status": "ready"
         }
@@ -1161,7 +1265,7 @@ def _run_batch_job_worker(
 
 
 @app.post("/api/batch-process")
-async def batch_process_endpoint(
+def batch_process_endpoint(
     background_tasks: BackgroundTasks,
     bg_replacement_enabled: bool = Form(True),
     backdrop_type: str = Form("royal_navy"),
@@ -1282,7 +1386,7 @@ async def batch_process_endpoint(
 
 
 @app.post("/api/jobs/batch-process", status_code=202)
-async def start_background_batch_job(
+def start_background_batch_job(
     background_tasks: BackgroundTasks,
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
@@ -1332,6 +1436,45 @@ def get_job_status(job_id: str):
         created_at=time.time(),
         error=db_job.get("error_message")
     )
+
+
+@app.get("/api/jobs/{job_id}/stream")
+def stream_job_progress(job_id: str):
+    """Server-Sent Events (SSE) streaming progress per photo every 1-2 seconds."""
+    def event_generator():
+        while True:
+            job = ACTIVE_JOBS.get(job_id)
+            if not job:
+                db_job = fetch_job_db(job_id)
+                if db_job:
+                    data = json.dumps({
+                        "job_id": db_job["id"],
+                        "status": db_job["status"],
+                        "progress": db_job["progress_percentage"],
+                        "total": db_job["total_items"],
+                        "processed": db_job["processed_items"]
+                    })
+                    yield f"data: {data}\n\n"
+                    if db_job["status"] in ("completed", "failed"):
+                        break
+                else:
+                    yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
+                    break
+            else:
+                data = json.dumps({
+                    "job_id": job["job_id"],
+                    "status": job["status"],
+                    "progress": job["progress"],
+                    "total": job["total"],
+                    "processed": job["processed"],
+                    "message": job.get("message")
+                })
+                yield f"data: {data}\n\n"
+                if job["status"] in ("completed", "failed"):
+                    break
+            time.sleep(1.0)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # =========================================================================
