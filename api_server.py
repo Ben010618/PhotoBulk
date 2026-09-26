@@ -127,19 +127,40 @@ init_database()
 
 app = FastAPI(title="KameraPh Studio Engine API", version="5.2.0")
 
-# 1. Tightened CORS Configuration
+# 1. Tightened Production CORS Configuration
+is_production = os.environ.get("DEBUG", "False").lower() in ("false", "0", "no")
+frontend_url = os.environ.get("FRONTEND_URL", "").strip()
 raw_origins = os.environ.get(
     "ALLOWED_ORIGINS", 
+    "https://kameraph.com,https://app.kameraph.com,https://auragrad.ph" if is_production else
     "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
 )
+
 allowed_origins = [orig.strip() for orig in raw_origins.split(",") if orig.strip()]
+if frontend_url and frontend_url not in allowed_origins:
+    allowed_origins.append(frontend_url)
+
+# Always allow local dev origins if not in strict production mode
+if not is_production:
+    for dev_orig in ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"]:
+        if dev_orig not in allowed_origins:
+            allowed_origins.append(dev_orig)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "Paymongo-Signature",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers"
+    ],
 )
 
 # 2. Global AI Engine Configuration (Gemini API loaded strictly from environment)
@@ -228,41 +249,73 @@ def deduct_studio_credit(studio_id: Optional[str] = None, count: int = 1) -> boo
 
 
 def sanitize_filename_or_folder(name: str) -> str:
-    """Sanitizes user input for headers and zip directories against path traversal."""
-    # Prevent directory traversal
-    no_traversal = name.replace("..", "_").replace("/", "_").replace("\\", "_")
+    """
+    Sanitizes user input for headers and zip directories against path traversal
+    and HTTP response splitting (CRLF injection).
+    """
+    # 1. Strip CRLF, tabs and null bytes to prevent header splitting
+    no_ctrl = re.sub(r'[\r\n\0\t]', '_', name)
+    # 2. Prevent directory traversal
+    no_traversal = no_ctrl.replace("..", "_").replace("/", "_").replace("\\", "_")
+    # 3. Whitelist safe characters only
     cleaned = re.sub(r'[^a-zA-Z0-9_\-\. ]', '_', no_traversal).strip()
-    cleaned = re.sub(r'^\.+', '', cleaned)
+    # 4. Strip leading/trailing dots and spaces (Windows path hazards)
+    cleaned = re.sub(r'^[\. \-_]+', '', cleaned)
+    cleaned = re.sub(r'[\. ]+$', '', cleaned)
+    # 5. Restrict maximum length to 80 chars
+    cleaned = cleaned[:80].strip()
     return cleaned if cleaned else "Graduation_Cohort_2026"
 
 
-def validate_image_upload(contents: bytes, filename: str, content_type: Optional[str] = None):
-    """Enforces strict upload size, MIME type, and pixel constraints."""
+def validate_image_upload(contents: bytes, filename: str, content_type: Optional[str] = None) -> np.ndarray:
+    """
+    Enforces strict upload size, true magic-byte MIME verification, and pixel count constraints
+    to protect against decompression bombs and malicious payload injection.
+    """
+    # 1. Maximum file size check
     if len(contents) > MAX_UPLOAD_SIZE:
         raise HTTPException(
             status_code=413,
             detail=f"File {filename} exceeds maximum allowed size ({MAX_UPLOAD_SIZE // (1024*1024)} MB)"
         )
 
-    # Magic byte MIME verification
-    if content_type and content_type not in ALLOWED_MIME_TYPES:
-        ext = os.path.splitext(filename)[1].lower()
-        if ext not in [".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File {filename} has unsupported format. Please upload JPEG, PNG, WebP, or TIFF."
-            )
+    # 2. Minimum payload size check
+    if len(contents) < 16:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File {filename} is too small to be a valid image."
+        )
 
+    # 3. Cryptographic Magic Bytes Verification (Independent of spoofable Content-Type header)
+    is_jpeg = contents.startswith(b'\xff\xd8\xff')
+    is_png = contents.startswith(b'\x89PNG\r\n\x1a\n')
+    is_webp = contents[:4] == b'RIFF' and len(contents) >= 12 and contents[8:12] == b'WEBP'
+    is_tiff = contents[:4] in (b'II*\x00', b'MM\x00*')
+
+    if not (is_jpeg or is_png or is_webp or is_tiff):
+        raise HTTPException(
+            status_code=400,
+            detail=f"File {filename} failed binary magic-byte verification. Only JPEG, PNG, WebP, and TIFF are supported."
+        )
+
+    # 4. Safe binary decoding via OpenCV
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(status_code=400, detail=f"Failed to decode image data from {filename}")
 
+    # 5. Pixel count / Decompression bomb prevention
     h, w = img.shape[:2]
     if (h * w) > MAX_PIXELS:
         raise HTTPException(
             status_code=400,
             detail=f"Image {filename} exceeds maximum pixel resolution ({w}x{h} = {h*w//1_000_000}MP > {MAX_PIXELS//1_000_000}MP)"
+        )
+
+    if h < 32 or w < 32:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Image {filename} dimensions ({w}x{h}) are too small for studio processing."
         )
 
     return img
@@ -826,14 +879,12 @@ async def process_single_image(
     studio_id = current_user.get("studio_id") if current_user else None
     studio = get_studio_state(studio_id)
 
-    # 1. Enforce Credit Requirement: Deduct 1 credit per processed photo
-    if studio["credit_balance"] <= 0:
+    # 1. Enforce Credit Requirement: Atomically deduct 1 credit per processed photo
+    if not deduct_studio_credit(studio["id"], count=1):
         raise HTTPException(
             status_code=402,
             detail="Insufficient studio credits. Processing blocked. Please top up credits to continue."
         )
-
-    deduct_studio_credit(studio["id"], count=1)
 
     if photo_id and photo_id in BATCH_STORE:
         img_bgr = BATCH_STORE[photo_id]["img_bgr"]
@@ -997,8 +1048,18 @@ def _run_batch_job_worker(
                 continue
 
             try:
-                # Deduct 1 credit per successfully processed photo
-                deduct_studio_credit(studio_id, count=1)
+                # Deduct 1 credit per photo; block immediately if zero balance
+                if not deduct_studio_credit(studio_id, count=1):
+                    item["status"] = "failed"
+                    item["error"] = "Insufficient studio credits. Processing blocked."
+                    processed_items.append({
+                        "id": item["id"],
+                        "name": item.get("filename", pid),
+                        "status": "failed",
+                        "error": "Insufficient studio credits. Processing blocked."
+                    })
+                    continue
+
                 img_bgr = item["img_bgr"]
 
                 pipe_res = process_image(img_bgr, parameters=params)
@@ -1149,7 +1210,8 @@ async def batch_process_endpoint(
         start_all = time.time()
         processed_items = []
         for item in target_items:
-            deduct_studio_credit(studio["id"], count=1)
+            if not deduct_studio_credit(studio["id"], count=1):
+                break
             pipe_res = process_image(item["img_bgr"], parameters=params)
             if pipe_res.success:
                 item["enhanced_bgr"] = pipe_res.enhanced_bgr
@@ -1271,7 +1333,7 @@ def export_pdf_contact_sheet(
 
     items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(prefix=f"kameraph_contact_{uuid.uuid4().hex[:8]}_") as temp_dir:
         photos_data = []
         for idx, item in enumerate(items):
             img_enh = item.get("enhanced_bgr", item["img_bgr"])
@@ -1311,7 +1373,7 @@ def export_pdf_gang_sheet(
 
     items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(prefix=f"kameraph_gang_{uuid.uuid4().hex[:8]}_") as temp_dir:
         students_data = []
         if items:
             for idx, item in enumerate(items):

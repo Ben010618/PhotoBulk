@@ -85,6 +85,21 @@ CREATE TABLE IF NOT EXISTS public.export_jobs (
     error_message TEXT
 );
 
+-- 6. ASYNCHRONOUS BACKGROUND JOBS LEDGER
+CREATE TABLE IF NOT EXISTS public.jobs (
+    id TEXT PRIMARY KEY,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    studio_id UUID REFERENCES public.studios(id) ON DELETE CASCADE NOT NULL,
+    job_type TEXT NOT NULL DEFAULT 'batch_process',
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'processing', 'completed', 'failed')),
+    progress_percentage INTEGER DEFAULT 0,
+    total_items INTEGER DEFAULT 0,
+    processed_items INTEGER DEFAULT 0,
+    result_json JSONB,
+    error_message TEXT
+);
+
 -- =========================================================================
 -- ROW LEVEL SECURITY (RLS) POLICIES FOR MULTI-TENANCY ISOLATION
 -- =========================================================================
@@ -94,63 +109,106 @@ ALTER TABLE public.batches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.photos ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.export_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.jobs ENABLE ROW LEVEL SECURITY;
+
+-- Helper function to resolve tenant studio_id from either Supabase auth.uid()
+-- or session variable 'app.current_studio_id' (for pooled DB connections).
+CREATE OR REPLACE FUNCTION public.current_studio_id()
+RETURNS UUID AS $$
+BEGIN
+    -- 1. Try Supabase JWT claim
+    IF auth.uid() IS NOT NULL THEN
+        RETURN auth.uid();
+    END IF;
+    -- 2. Try PostgreSQL session variable set by connection pool
+    RETURN NULLIF(current_setting('app.current_studio_id', true), '')::UUID;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN NULL;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
 
 -- 1. STUDIOS POLICIES
 -- Studio owners can read and update only their own profile
 CREATE POLICY "Studios can view own record" ON public.studios
-    FOR SELECT USING (auth.uid() = id);
+    FOR SELECT USING (id = public.current_studio_id());
 
 CREATE POLICY "Studios can update own record" ON public.studios
-    FOR UPDATE USING (auth.uid() = id);
+    FOR UPDATE USING (id = public.current_studio_id());
 
 -- Service role bypass for backend billing webhooks and admin operations
 CREATE POLICY "Service role full access on studios" ON public.studios
-    FOR ALL USING (auth.jwt() ->> 'role' = 'service_role');
+    FOR ALL USING (auth.jwt() ->> 'role' = 'service_role' OR current_setting('app.is_super_admin', true) = 'true');
 
 -- 2. BATCHES POLICIES
 -- Multi-tenancy: Studios can only select, insert, update, delete their own batches
 CREATE POLICY "Studios view own batches" ON public.batches
-    FOR SELECT USING (auth.uid() = studio_id);
+    FOR SELECT USING (studio_id = public.current_studio_id());
 
 CREATE POLICY "Studios insert own batches" ON public.batches
-    FOR INSERT WITH CHECK (auth.uid() = studio_id);
+    FOR INSERT WITH CHECK (studio_id = public.current_studio_id());
 
 CREATE POLICY "Studios update own batches" ON public.batches
-    FOR UPDATE USING (auth.uid() = studio_id);
+    FOR UPDATE USING (studio_id = public.current_studio_id());
 
 CREATE POLICY "Studios delete own batches" ON public.batches
-    FOR DELETE USING (auth.uid() = studio_id);
+    FOR DELETE USING (studio_id = public.current_studio_id());
+
+CREATE POLICY "Service role full access on batches" ON public.batches
+    FOR ALL USING (auth.jwt() ->> 'role' = 'service_role' OR current_setting('app.is_super_admin', true) = 'true');
 
 -- 3. PHOTOS POLICIES
 -- Studios can only access photos belonging to their studio
 CREATE POLICY "Studios view own photos" ON public.photos
-    FOR SELECT USING (auth.uid() = studio_id);
+    FOR SELECT USING (studio_id = public.current_studio_id());
 
 CREATE POLICY "Studios insert own photos" ON public.photos
-    FOR INSERT WITH CHECK (auth.uid() = studio_id);
+    FOR INSERT WITH CHECK (studio_id = public.current_studio_id());
 
 CREATE POLICY "Studios update own photos" ON public.photos
-    FOR UPDATE USING (auth.uid() = studio_id);
+    FOR UPDATE USING (studio_id = public.current_studio_id());
 
 CREATE POLICY "Studios delete own photos" ON public.photos
-    FOR DELETE USING (auth.uid() = studio_id);
+    FOR DELETE USING (studio_id = public.current_studio_id());
 
 -- Public / Students can only view their own photo proof if student_id_number matches
 CREATE POLICY "Students view individual proof" ON public.photos
     FOR SELECT USING (student_id_number IS NOT NULL AND status = 'completed');
 
+CREATE POLICY "Service role full access on photos" ON public.photos
+    FOR ALL USING (auth.jwt() ->> 'role' = 'service_role' OR current_setting('app.is_super_admin', true) = 'true');
+
 -- 4. TRANSACTIONS POLICIES
 -- Studios can view only their financial history
 CREATE POLICY "Studios view own transactions" ON public.transactions
-    FOR SELECT USING (auth.uid() = studio_id);
+    FOR SELECT USING (studio_id = public.current_studio_id());
 
 -- Only backend service role (PayMongo webhook) can record transactions
 CREATE POLICY "Service role insert transactions" ON public.transactions
-    FOR INSERT WITH CHECK (auth.jwt() ->> 'role' = 'service_role');
+    FOR INSERT WITH CHECK (auth.jwt() ->> 'role' = 'service_role' OR current_setting('app.is_super_admin', true) = 'true');
+
+CREATE POLICY "Service role full access on transactions" ON public.transactions
+    FOR ALL USING (auth.jwt() ->> 'role' = 'service_role' OR current_setting('app.is_super_admin', true) = 'true');
 
 -- 5. EXPORT JOBS POLICIES
 CREATE POLICY "Studios view own export jobs" ON public.export_jobs
-    FOR SELECT USING (auth.uid() = studio_id);
+    FOR SELECT USING (studio_id = public.current_studio_id());
 
 CREATE POLICY "Studios create own export jobs" ON public.export_jobs
-    FOR INSERT WITH CHECK (auth.uid() = studio_id);
+    FOR INSERT WITH CHECK (studio_id = public.current_studio_id());
+
+CREATE POLICY "Service role full access on export jobs" ON public.export_jobs
+    FOR ALL USING (auth.jwt() ->> 'role' = 'service_role' OR current_setting('app.is_super_admin', true) = 'true');
+
+-- 6. ASYNC BACKGROUND JOBS POLICIES
+CREATE POLICY "Studios view own jobs" ON public.jobs
+    FOR SELECT USING (studio_id = public.current_studio_id());
+
+CREATE POLICY "Studios create own jobs" ON public.jobs
+    FOR INSERT WITH CHECK (studio_id = public.current_studio_id());
+
+CREATE POLICY "Studios update own jobs" ON public.jobs
+    FOR UPDATE USING (studio_id = public.current_studio_id());
+
+CREATE POLICY "Service role full access on jobs" ON public.jobs
+    FOR ALL USING (auth.jwt() ->> 'role' = 'service_role' OR current_setting('app.is_super_admin', true) = 'true');
