@@ -180,6 +180,101 @@ def format_export_filename(
     return cleaned
 
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+OUTPUT_FOLDERS = {
+    "master": ("1_Full_Res_Masters", "Master"),
+    "8r": ("2_8R_Yearbook_Frames", "8R"),
+    "5r": ("3_5R_Prints", "5R"),
+    "4r": ("4_4R_Prints", "4R"),
+    "wallet": ("5_Wallet_Photos", "Wallet"),
+    "2x2": ("6_2x2_Formal_IDs", "2x2"),
+    "web": ("7_Web_Portals", "Web"),
+}
+
+
+def _render_and_export_photo_task(task_args: Dict[str, Any]) -> Dict[str, Any]:
+    """Worker task executing full-res rendering and size generation for a single photo in parallel."""
+    project_id = task_args["project_id"]
+    pid = task_args["photo_id"]
+    orig_fn = task_args["orig_fn"]
+    staging_dir = Path(task_args["staging_dir"])
+    outputs = task_args["outputs"]
+    assigned_outputs = task_args["assigned_outputs"]
+    student_display_name = task_args["student_display_name"]
+    analysis = task_args.get("analysis", {})
+
+    # 1. Full-Resolution Master Render
+    render_res = project_store.render_full_resolution(project_id, pid)
+    master_path = Path(render_res["master_path"])
+    master_bgr = cv2.imread(str(master_path))
+
+    if master_bgr is None:
+        logger.warning(f"Could not load master render for {pid}, skipping sizes.")
+        return {
+            "photo_id": pid,
+            "orig_fn": orig_fn,
+            "files": [],
+            "contact_sheet_item": None,
+            "success": False
+        }
+
+    features = project_store.compute_and_cache_heavy_features(project_id, pid)
+    face_info = features.get("face_info")
+
+    # Contact sheet thumbnail
+    thumb_path = staging_dir / f"thumb_{pid}.jpg"
+    save_jpeg_with_profile(master_bgr, thumb_path, target_size=(360, 480), dpi=96, quality=80)
+    contact_sheet_item = {
+        "image_path": str(thumb_path),
+        "student_name": student_display_name,
+        "analysis": analysis
+    }
+
+    files_to_write: List[Tuple[Path, str]] = []
+
+    # 2. Render each output size to staging directory
+    for out_key in outputs:
+        if out_key not in assigned_outputs:
+            continue
+        final_fn, arcname = assigned_outputs[out_key]
+        out_p = staging_dir / f"{out_key}_{final_fn}"
+
+        if out_key == "master":
+            save_jpeg_with_profile(master_bgr, out_p, dpi=300, quality=95)
+        elif out_key == "8r":
+            crop8r = crop_8r_aspect(master_bgr)
+            save_jpeg_with_profile(crop8r, out_p, target_size=PRINT_SIZES_300DPI["8r"], dpi=300, quality=95)
+        elif out_key == "5r":
+            crop5r = crop_aspect(master_bgr, 5.0, 7.0)
+            save_jpeg_with_profile(crop5r, out_p, target_size=PRINT_SIZES_300DPI["5r"], dpi=300, quality=95)
+        elif out_key == "4r":
+            crop4r = crop_aspect(master_bgr, 2.0, 3.0)
+            save_jpeg_with_profile(crop4r, out_p, target_size=PRINT_SIZES_300DPI["4r"], dpi=300, quality=95)
+        elif out_key == "wallet":
+            crop_wal = crop_aspect(master_bgr, 5.0, 7.0)
+            save_jpeg_with_profile(crop_wal, out_p, target_size=PRINT_SIZES_300DPI["wallet"], dpi=300, quality=95)
+        elif out_key == "2x2":
+            crop2x2 = crop_2x2_id(master_bgr, face_info)
+            save_jpeg_with_profile(crop2x2, out_p, target_size=PRINT_SIZES_300DPI["2x2"], dpi=300, quality=95)
+        elif out_key == "web":
+            h, w = master_bgr.shape[:2]
+            max_edge = max(w, h)
+            scale = min(1.0, 1600.0 / float(max_edge))
+            web_size = (int(w * scale), int(h * scale))
+            save_jpeg_with_profile(master_bgr, out_p, target_size=web_size, dpi=96, quality=88)
+
+        files_to_write.append((out_p, arcname))
+
+    return {
+        "photo_id": pid,
+        "orig_fn": orig_fn,
+        "files": files_to_write,
+        "contact_sheet_item": contact_sheet_item,
+        "success": True
+    }
+
+
 def execute_bulk_export(
     project_id: str,
     export_id: str,
@@ -193,10 +288,11 @@ def execute_bulk_export(
 ) -> Dict[str, Any]:
     """
     Executes full-resolution bulk export:
-      1. Renders full-resolution master for each photo.
-      2. Generates selected sizes at 300 DPI with sRGB profile embedded.
-      3. Generates contact sheet PDF.
-      4. Compresses all assets into a single ZIP archive.
+      1. Deterministically calculates unique filenames (appending _2, _3 for collisions).
+      2. Validates image resolutions against 300 DPI print standards (DPI warnings).
+      3. Renders full-resolution master and sizes in parallel with worker pool.
+      4. Generates contact sheet PDF and EXPORT_MANIFEST.txt.
+      5. Compresses all assets into a single ZIP archive.
     """
     start_time = time.time()
     photos = project_store.list_photos(project_id)
@@ -206,117 +302,124 @@ def execute_bulk_export(
     if student_csv:
         student_mapping = parse_student_csv(student_csv)
 
-    # Output directory for staged export files
     staging_dir = EXPORTS_DIR / f"{project_id}_{export_id}"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     zip_path = EXPORTS_DIR / f"{sanitize_filename(school_name)}_{export_id}.zip"
 
-    contact_sheet_items: List[Dict[str, Any]] = []
-    generated_files_count = 0
-
     clean_school = sanitize_filename(school_name)
     outputs = [o.lower() for o in selected_outputs] if selected_outputs else ["master", "8r", "2x2"]
 
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for idx, p in enumerate(photos, 1):
-            pid = p["id"]
-            orig_fn = p["filename"]
-            base_fn = os.path.splitext(orig_fn)[0]
+    # 1. Deterministic Filename Uniqueness & DPI Warning Check
+    used_filenames_by_output: Dict[str, set] = {o: set() for o in outputs}
+    photo_tasks: List[Dict[str, Any]] = []
+    manifest_entries: List[str] = []
+    dpi_warnings: List[str] = []
 
-            # Find student info from mapping
-            s_info = student_mapping.get(base_fn.lower()) or student_mapping.get(pid.lower()) or {}
-            student_display_name = s_info.get("name") or s_info.get("first") or base_fn
+    for idx, p in enumerate(photos, 1):
+        pid = p["id"]
+        orig_fn = p["filename"]
+        base_fn = os.path.splitext(orig_fn)[0]
 
-            if progress_callback:
-                progress_callback(idx, total_photos, f"Rendering {orig_fn} ({idx}/{total_photos})")
+        s_info = student_mapping.get(base_fn.lower()) or student_mapping.get(pid.lower()) or {}
+        student_display_name = s_info.get("name") or s_info.get("first") or base_fn
 
-            # 1. Full-Resolution Master Render
-            render_res = project_store.render_full_resolution(project_id, pid)
-            master_path = Path(render_res["master_path"])
-            master_bgr = cv2.imread(str(master_path))
+        # Check source dimensions for DPI warnings
+        p_dir = project_store.get_photo_dir(project_id, pid)
+        orig_img_path = p_dir / "original.jpg"
+        source_w, source_h = (0, 0)
+        if orig_img_path.exists():
+            try:
+                with Image.open(str(orig_img_path)) as im:
+                    source_w, source_h = im.size
+            except Exception:
+                pass
 
-            if master_bgr is None:
-                logger.warning(f"Could not load master render for {pid}, skipping sizes.")
+        assigned_outputs: Dict[str, Tuple[str, str]] = {}
+        for out_key in outputs:
+            if out_key not in OUTPUT_FOLDERS:
                 continue
+            folder_name, size_label = OUTPUT_FOLDERS[out_key]
 
-            features = project_store.compute_and_cache_heavy_features(project_id, pid)
-            face_info = features.get("face_info")
+            # DPI validation: Check if source photo is smaller than required 300 DPI print dimension
+            if out_key in PRINT_SIZES_300DPI and source_w > 0 and source_h > 0:
+                req_w, req_h = PRINT_SIZES_300DPI[out_key]
+                if min(source_w, source_h) < min(req_w, req_h) or max(source_w, source_h) < max(req_w, req_h):
+                    warn_msg = (
+                        f"DPI WARNING: Photo '{orig_fn}' ({source_w}x{source_h}) is smaller than required "
+                        f"300 DPI print dimensions for {size_label} ({req_w}x{req_h}). "
+                        f"Silently upscaling to print size without studio warning may reduce print sharpness."
+                    )
+                    if warn_msg not in dpi_warnings:
+                        dpi_warnings.append(warn_msg)
 
-            # Contact sheet thumbnail collection
-            thumb_path = staging_dir / f"thumb_{pid}.jpg"
-            save_jpeg_with_profile(master_bgr, thumb_path, target_size=(360, 480), dpi=96, quality=80)
-            contact_sheet_items.append({
-                "image_path": str(thumb_path),
-                "student_name": student_display_name,
-                "analysis": p.get("analysis", {})
-            })
+            # Filename formatting
+            candidate_fn = format_export_filename(filename_template, orig_fn, s_info, size_label)
 
-            # 2. Generate and write selected outputs
-            # Master
-            if "master" in outputs:
-                fn = format_export_filename(filename_template, orig_fn, s_info, "Master")
-                out_p = staging_dir / f"master_{fn}"
-                save_jpeg_with_profile(master_bgr, out_p, dpi=300, quality=95)
-                zf.write(out_p, arcname=f"{clean_school}/1_Full_Res_Masters/{fn}")
-                generated_files_count += 1
+            # Collision handling: if filename already taken, append _2, _3, etc.
+            if candidate_fn in used_filenames_by_output[out_key]:
+                stem, ext = os.path.splitext(candidate_fn)
+                counter = 2
+                while True:
+                    deduped_fn = f"{stem}_{counter}{ext}"
+                    if deduped_fn not in used_filenames_by_output[out_key]:
+                        final_fn = deduped_fn
+                        break
+                    counter += 1
+            else:
+                final_fn = candidate_fn
 
-            # 8R (8x10 inches at 300 DPI -> 2400x3000)
-            if "8r" in outputs:
-                fn = format_export_filename(filename_template, orig_fn, s_info, "8R")
-                crop8r = crop_8r_aspect(master_bgr)
-                out_p = staging_dir / f"8r_{fn}"
-                save_jpeg_with_profile(crop8r, out_p, target_size=PRINT_SIZES_300DPI["8r"], dpi=300, quality=95)
-                zf.write(out_p, arcname=f"{clean_school}/2_8R_Yearbook_Frames/{fn}")
-                generated_files_count += 1
+            used_filenames_by_output[out_key].add(final_fn)
+            arcname = f"{clean_school}/{folder_name}/{final_fn}"
+            assigned_outputs[out_key] = (final_fn, arcname)
+            manifest_entries.append(
+                f"[{size_label.upper()}] {final_fn} -> {arcname} (Student: {student_display_name}, Photo ID: {pid}, Source: {orig_fn})"
+            )
 
-            # 5R (5x7 inches at 300 DPI -> 1500x2100)
-            if "5r" in outputs:
-                fn = format_export_filename(filename_template, orig_fn, s_info, "5R")
-                crop5r = crop_aspect(master_bgr, 5.0, 7.0)
-                out_p = staging_dir / f"5r_{fn}"
-                save_jpeg_with_profile(crop5r, out_p, target_size=PRINT_SIZES_300DPI["5r"], dpi=300, quality=95)
-                zf.write(out_p, arcname=f"{clean_school}/3_5R_Prints/{fn}")
-                generated_files_count += 1
+        photo_tasks.append({
+            "idx": idx,
+            "project_id": project_id,
+            "photo_id": pid,
+            "orig_fn": orig_fn,
+            "staging_dir": str(staging_dir),
+            "outputs": outputs,
+            "assigned_outputs": assigned_outputs,
+            "student_display_name": student_display_name,
+            "analysis": p.get("analysis", {})
+        })
 
-            # 4R (4x6 inches at 300 DPI -> 1200x1800)
-            if "4r" in outputs:
-                fn = format_export_filename(filename_template, orig_fn, s_info, "4R")
-                crop4r = crop_aspect(master_bgr, 2.0, 3.0)
-                out_p = staging_dir / f"4r_{fn}"
-                save_jpeg_with_profile(crop4r, out_p, target_size=PRINT_SIZES_300DPI["4r"], dpi=300, quality=95)
-                zf.write(out_p, arcname=f"{clean_school}/4_4R_Prints/{fn}")
-                generated_files_count += 1
+    # 2. Parallel Full-Resolution Rendering using Worker Pool
+    contact_sheet_items: List[Dict[str, Any]] = []
+    generated_files_count = 0
+    workers = min(max(1, (os.cpu_count() or 2) - 1), 8)
 
-            # Wallet (2.5x3.5 inches at 300 DPI -> 750x1050)
-            if "wallet" in outputs:
-                fn = format_export_filename(filename_template, orig_fn, s_info, "Wallet")
-                crop_wal = crop_aspect(master_bgr, 5.0, 7.0)
-                out_p = staging_dir / f"wallet_{fn}"
-                save_jpeg_with_profile(crop_wal, out_p, target_size=PRINT_SIZES_300DPI["wallet"], dpi=300, quality=95)
-                zf.write(out_p, arcname=f"{clean_school}/5_Wallet_Photos/{fn}")
-                generated_files_count += 1
+    logger.info(f"[ExportEngine] Starting parallel export of {total_photos} photos using {workers} worker threads")
 
-            # 2x2 Formal ID (600x600 px at 300 DPI)
-            if "2x2" in outputs:
-                fn = format_export_filename(filename_template, orig_fn, s_info, "2x2")
-                crop2x2 = crop_2x2_id(master_bgr, face_info)
-                out_p = staging_dir / f"2x2_{fn}"
-                save_jpeg_with_profile(crop2x2, out_p, target_size=PRINT_SIZES_300DPI["2x2"], dpi=300, quality=95)
-                zf.write(out_p, arcname=f"{clean_school}/6_2x2_Formal_IDs/{fn}")
-                generated_files_count += 1
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_task = {
+                executor.submit(_render_and_export_photo_task, task): task
+                for task in photo_tasks
+            }
 
-            # Web JPEG (max 1600px long edge, ~96 DPI, Quality 88)
-            if "web" in outputs:
-                fn = format_export_filename(filename_template, orig_fn, s_info, "Web")
-                h, w = master_bgr.shape[:2]
-                max_edge = max(w, h)
-                scale = min(1.0, 1600.0 / float(max_edge))
-                web_size = (int(w * scale), int(h * scale))
-                out_p = staging_dir / f"web_{fn}"
-                save_jpeg_with_profile(master_bgr, out_p, target_size=web_size, dpi=96, quality=88)
-                zf.write(out_p, arcname=f"{clean_school}/7_Web_Portals/{fn}")
-                generated_files_count += 1
+            processed = 0
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    task_res = future.result()
+                    if task_res.get("success"):
+                        for out_p, arcname in task_res.get("files", []):
+                            if out_p.exists():
+                                zf.write(out_p, arcname=arcname)
+                                generated_files_count += 1
+                        if task_res.get("contact_sheet_item"):
+                            contact_sheet_items.append(task_res["contact_sheet_item"])
+                except Exception as err:
+                    logger.error(f"[ExportEngine] Photo render failure for {task['photo_id']}: {err}")
+
+                processed += 1
+                if progress_callback:
+                    progress_callback(processed, total_photos, f"Exported {task['orig_fn']} ({processed}/{total_photos})")
 
         # 3. Add Contact Sheet PDF
         if include_contact_sheet and contact_sheet_items:
@@ -334,21 +437,35 @@ def execute_bulk_export(
 
         # 4. Add Manifest Summary TXT
         elapsed_sec = round(time.time() - start_time, 2)
-        manifest_text = (
-            f"KAMERAPH GRADUATION STUDIO BULK EXPORT\n"
-            f"=====================================\n"
-            f"School/Cohort   : {school_name}\n"
-            f"Studio Name     : {studio_name}\n"
-            f"Export Job ID   : {export_id}\n"
-            f"Date & Time     : {time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-            f"Total Portraits : {total_photos}\n"
-            f"Files Generated : {generated_files_count}\n"
-            f"Elapsed Time    : {elapsed_sec} seconds\n"
-            f"Color Space     : sRGB (embedded ICC)\n"
-            f"Print Standard  : 300 DPI, Quality 95\n"
-            f"Selected Sizes  : {', '.join(outputs).upper()}\n"
-            f"Filename Pattern: {filename_template}\n"
-        )
+        manifest_lines = [
+            "KAMERAPH GRADUATION STUDIO BULK EXPORT",
+            "=====================================",
+            f"School/Cohort   : {school_name}",
+            f"Studio Name     : {studio_name}",
+            f"Export Job ID   : {export_id}",
+            f"Date & Time     : {time.strftime('%Y-%m-%d %H:%M:%S UTC')}",
+            f"Total Portraits : {total_photos}",
+            f"Files Generated : {generated_files_count}",
+            f"Elapsed Time    : {elapsed_sec} seconds",
+            f"Color Space     : sRGB (embedded ICC)",
+            f"Print Standard  : 300 DPI, Quality 95",
+            f"Selected Sizes  : {', '.join(outputs).upper()}",
+            f"Filename Pattern: {filename_template}",
+            ""
+        ]
+
+        if dpi_warnings:
+            manifest_lines.append("DPI WARNINGS & PRINT NOTICES:")
+            manifest_lines.append("-----------------------------")
+            manifest_lines.extend(dpi_warnings)
+            manifest_lines.append("")
+
+        manifest_lines.append("EXPORTED FILES MANIFEST:")
+        manifest_lines.append("------------------------")
+        for entry in sorted(manifest_entries):
+            manifest_lines.append(entry)
+
+        manifest_text = "\n".join(manifest_lines) + "\n"
         zf.writestr(f"{clean_school}/EXPORT_MANIFEST.txt", manifest_text)
 
     # Clean up staging temporary images
@@ -366,5 +483,8 @@ def execute_bulk_export(
         "file_size_bytes": file_size_bytes,
         "total_portraits": total_photos,
         "total_files": generated_files_count,
-        "elapsed_sec": round(time.time() - start_time, 2)
+        "elapsed_sec": round(time.time() - start_time, 2),
+        "warnings": dpi_warnings,
+        "dpi_warnings": dpi_warnings,
+        "manifest": manifest_text
     }

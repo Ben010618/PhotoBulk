@@ -394,13 +394,36 @@ export default function App() {
 
     try {
       const res = await api.applyToAll(currentProjectId, activePhoto.id, true);
-      addToast(
-        'success',
-        `Applied look to all! Updated ${res.updated_count} portraits (${res.skipped_count} customized overrides preserved).`
-      );
-
-      // Reload project photos to show newly harmonized previews
-      await refreshProjectPhotos(currentProjectId);
+      if (res.job_id && res.status === 'processing') {
+        // Background worker pool processing: poll job and refresh thumbnails as completed
+        let isDone = false;
+        while (!isDone) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+          try {
+            const status = await api.getJobStatus(res.job_id);
+            // Refresh thumbnails as they complete
+            await refreshProjectPhotos(currentProjectId);
+            if (status.status === 'completed') {
+              isDone = true;
+              addToast(
+                'success',
+                `Applied look to all! Updated ${res.updated_count} portraits (${res.skipped_count} customized overrides preserved).`
+              );
+            } else if (status.status === 'failed') {
+              isDone = true;
+              addToast('error', status.error || 'Apply to all failed in background');
+            }
+          } catch (pollErr) {
+            console.warn('[App] Notice polling apply job:', pollErr);
+          }
+        }
+      } else {
+        addToast(
+          'success',
+          `Applied look to all! Updated ${res.updated_count} portraits (${res.skipped_count} customized overrides preserved).`
+        );
+        await refreshProjectPhotos(currentProjectId);
+      }
     } catch (err: unknown) {
       console.error('[App] Apply to all error:', err);
       const msg = err instanceof Error ? err.message : 'Apply to all failed';

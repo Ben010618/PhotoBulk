@@ -24,6 +24,7 @@ import json
 import hashlib
 import tempfile
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import traceback
 from pathlib import Path
@@ -1278,24 +1279,151 @@ def clear_photo_override_endpoint(
 def apply_look_to_all_photos(
     project_id: str,
     source_photo_id: str,
+    background_tasks: BackgroundTasks,
     exclude_overridden: bool = Query(True),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
+    """
+    Returns job_id immediately and re-renders previews in background using worker pool.
+    Frontend polls /api/jobs/{job_id} and refreshes thumbnails as they complete.
+    """
     check_project_ownership(project_id, current_user)
     validate_id(source_photo_id, "photo_id")
-    try:
-        res = project_store.apply_settings_to_project(
-            project_id=project_id,
-            source_photo_id=source_photo_id,
-            exclude_overridden=exclude_overridden
+
+    source_dir = project_store.get_photo_dir(project_id, source_photo_id)
+    source_settings = project_store.load_json(source_dir / "settings.json")
+    if not source_settings:
+        raise HTTPException(status_code=404, detail=f"Source settings not found for photo {source_photo_id}")
+
+    template = dict(source_settings)
+    template["has_user_override"] = False
+
+    photos = project_store.list_photos(project_id)
+    target_photo_ids: List[str] = []
+    skipped_photo_ids: List[str] = []
+
+    for p in photos:
+        pid = p["id"]
+        if pid == source_photo_id:
+            continue
+        p_dir = project_store.get_photo_dir(project_id, pid)
+        t_settings = project_store.load_json(p_dir / "settings.json") or {}
+        t_meta = project_store.load_json(p_dir / "meta.json") or {}
+        is_overridden = bool(
+            t_settings.get("has_user_override", False) or
+            t_meta.get("has_user_override", False)
         )
-        return {
-            "success": True,
-            **res
+        if exclude_overridden and is_overridden:
+            skipped_photo_ids.append(pid)
+        else:
+            target_photo_ids.append(pid)
+
+    job_id = f"job_apply_{project_id}_{int(time.time()*1000)}"
+    studio_id = current_user.get("studio_id", "default_studio")
+    total_targets = len(target_photo_ids)
+
+    record_job_db(
+        job_id=job_id,
+        studio_id=studio_id,
+        status="processing" if total_targets > 0 else "completed",
+        total=total_targets,
+        job_type="apply_all",
+        project_id=project_id
+    )
+
+    ACTIVE_JOBS[job_id] = {
+        "job_id": job_id,
+        "project_id": project_id,
+        "status": "processing" if total_targets > 0 else "completed",
+        "progress": 100 if total_targets == 0 else 0,
+        "total": total_targets,
+        "processed": 0,
+        "message": f"Applying look to {total_targets} portraits in background...",
+        "result": None,
+        "error": None,
+        "created_at": time.time()
+    }
+
+    def _bg_apply_worker():
+        try:
+            # 1. Update settings files first
+            for pid in target_photo_ids:
+                p_dir = project_store.get_photo_dir(project_id, pid)
+                cur_settings = project_store.load_json(p_dir / "settings.json") or {}
+                merged = {**cur_settings, **template, "has_user_override": False}
+                project_store.save_json(p_dir / "settings.json", merged)
+
+            # 2. Re-render previews in background using worker pool
+            def _render_task(pid):
+                project_store.render_preview_fast(project_id, pid)
+                return pid
+
+            processed = 0
+            workers = min(max(1, (os.cpu_count() or 2) - 1), 8)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_render_task, pid): pid for pid in target_photo_ids}
+                for fut in as_completed(futures):
+                    fut.result()
+                    processed += 1
+                    pct = int((processed / max(total_targets, 1)) * 100)
+                    if job_id in ACTIVE_JOBS:
+                        ACTIVE_JOBS[job_id]["processed"] = processed
+                        ACTIVE_JOBS[job_id]["progress"] = pct
+                        ACTIVE_JOBS[job_id]["message"] = f"Re-rendered {processed}/{total_targets} previews"
+                    update_job_db(job_id=job_id, status="processing", progress=pct, processed=processed)
+
+            res_payload = {
+                "project_id": project_id,
+                "source_photo_id": source_photo_id,
+                "updated_count": len(target_photo_ids),
+                "skipped_count": len(skipped_photo_ids),
+                "updated_photo_ids": target_photo_ids,
+                "skipped_photo_ids": skipped_photo_ids
+            }
+            if job_id in ACTIVE_JOBS:
+                ACTIVE_JOBS[job_id]["status"] = "completed"
+                ACTIVE_JOBS[job_id]["progress"] = 100
+                ACTIVE_JOBS[job_id]["message"] = "Apply to all completed"
+                ACTIVE_JOBS[job_id]["result"] = res_payload
+            update_job_db(
+                job_id=job_id,
+                status="completed",
+                progress=100,
+                processed=total_targets,
+                result_json=json.dumps(res_payload)
+            )
+        except Exception as exc:
+            logger.error(f"Apply to all background worker error: {exc}\n{traceback.format_exc()}")
+            if job_id in ACTIVE_JOBS:
+                ACTIVE_JOBS[job_id]["status"] = "failed"
+                ACTIVE_JOBS[job_id]["error"] = str(exc)
+            update_job_db(job_id=job_id, status="failed", progress=0, processed=0, error=str(exc))
+
+    if total_targets > 0:
+        background_tasks.add_task(_bg_apply_worker)
+    else:
+        empty_res = {
+            "project_id": project_id,
+            "source_photo_id": source_photo_id,
+            "updated_count": 0,
+            "skipped_count": len(skipped_photo_ids),
+            "updated_photo_ids": [],
+            "skipped_photo_ids": skipped_photo_ids
         }
-    except Exception as e:
-        logger.error(f"Failed to apply look across project {project_id}: {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Apply to all failed: {str(e)}")
+        update_job_db(job_id=job_id, status="completed", progress=100, processed=0, result_json=json.dumps(empty_res))
+
+    return {
+        "success": True,
+        "job_id": job_id,
+        "project_id": project_id,
+        "source_photo_id": source_photo_id,
+        "status": "processing" if total_targets > 0 else "completed",
+        "total": total_targets,
+        "updated_count": total_targets,
+        "skipped_count": len(skipped_photo_ids),
+        "updated_photo_ids": target_photo_ids,
+        "skipped_photo_ids": skipped_photo_ids
+    }
 
 @app.post("/api/projects/{project_id}/export")
 def trigger_project_export(

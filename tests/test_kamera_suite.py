@@ -1289,6 +1289,116 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertEqual(data_after["status"], "failed")
         self.assertIn("Job interrupted by server restart", data_after.get("error") or "")
 
+    def test_35_phase5_apply_to_all_job_export_uniqueness_and_dpi_warning(self):
+        """Phase 5: Background apply-to-all job ID return, parallel export with filename collision dedup, and DPI warnings in manifest."""
+        import time
+        import shutil
+        import zipfile
+        from project_store import project_store
+        from export_engine import execute_bulk_export
+
+        proj_id = f"test_phase5_{int(time.time()*1000)}"
+        studio_id = "studio_phase5"
+        token = create_access_token({"id": "u_p5", "email": "p5@test.ph", "role": "studio_admin", "studio_id": studio_id})
+        project_store.get_or_create_project(proj_id, title="Phase 5 Test", studio_id=studio_id)
+
+        try:
+            # 1. Setup 3 photos: p_source, p_dup1, p_dup2
+            # Make p_dup1 and p_dup2 small (500x500) so they trigger the 300 DPI 8R print warning (needs 2400x3000)
+            small_bgr = cv2.resize(self.astronaut_bgr, (500, 500))
+            project_store.save_uploaded_photo(proj_id, "p_source", "source.jpg", self.astronaut_bgr)
+            project_store.save_uploaded_photo(proj_id, "p_dup1", "student_a.jpg", small_bgr)
+            project_store.save_uploaded_photo(proj_id, "p_dup2", "student_b.jpg", small_bgr)
+
+            # Source look tuning
+            project_store.update_photo_settings(
+                proj_id,
+                "p_source",
+                {"preset_id": "studio_glow", "skin_smoothing": 0.88, "backdrop_type": "classic_blue"}
+            )
+
+            # 2. Test apply-to-all: returns job_id immediately and processes in background
+            res_apply = self.client.post(
+                f"/api/projects/{proj_id}/photos/p_source/apply-to-all",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            self.assertEqual(res_apply.status_code, 200)
+            apply_data = res_apply.json()
+            self.assertTrue(apply_data["success"])
+            self.assertIn("job_id", apply_data)
+            apply_job_id = apply_data["job_id"]
+            self.assertEqual(apply_data["status"], "processing")
+            self.assertEqual(apply_data["total"], 2)
+
+            # Poll job until completion
+            poll_data = None
+            for _ in range(40):
+                res_poll = self.client.get(f"/api/jobs/{apply_job_id}")
+                self.assertEqual(res_poll.status_code, 200)
+                poll_data = res_poll.json()
+                if poll_data["status"] in ("completed", "failed"):
+                    break
+                time.sleep(0.2)
+
+            self.assertIsNotNone(poll_data)
+            self.assertEqual(poll_data["status"], "completed")
+            self.assertEqual(poll_data["progress"], 100)
+
+            # Verify target settings updated
+            p2_settings = project_store.load_json(project_store.get_photo_dir(proj_id, "p_dup1") / "settings.json")
+            self.assertEqual(p2_settings["preset_id"], "studio_glow")
+            self.assertEqual(p2_settings["skin_smoothing"], 0.88)
+
+            # 3. Test Export: Filename uniqueness (append _2, _3) and DPI warning
+            # Provide student_csv where both student_a.jpg and student_b.jpg map to "Juan dela Cruz"
+            student_csv = (
+                "filename,first_name,last_name,section\n"
+                "student_a.jpg,Juan,dela Cruz,SectionA\n"
+                "student_b.jpg,Juan,dela Cruz,SectionA\n"
+            )
+
+            export_id = f"exp_p5_{int(time.time()*1000)}"
+            export_summary = execute_bulk_export(
+                project_id=proj_id,
+                export_id=export_id,
+                selected_outputs=["8r", "master"],
+                filename_template="{section}_{last}_{first}_{size}.jpg",
+                student_csv=student_csv,
+                school_name="Aura Academy",
+                include_contact_sheet=False
+            )
+
+            # Verify DPI warnings returned in export summary
+            self.assertIn("dpi_warnings", export_summary)
+            self.assertGreater(len(export_summary["dpi_warnings"]), 0)
+            dpi_warn_text = " ".join(export_summary["dpi_warnings"])
+            self.assertIn("DPI WARNING", dpi_warn_text)
+            self.assertIn("smaller than required", dpi_warn_text)
+
+            # 4. Verify ZIP archive contents
+            zip_path = export_summary["zip_path"]
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                namelist = zf.namelist()
+                # Check for 8R files of the duplicate students
+                file1 = "Aura_Academy/2_8R_Yearbook_Frames/SectionA_dela_Cruz_Juan_8R.jpg"
+                file2 = "Aura_Academy/2_8R_Yearbook_Frames/SectionA_dela_Cruz_Juan_8R_2.jpg"
+                self.assertIn(file1, namelist, f"Expected {file1} in zip")
+                self.assertIn(file2, namelist, f"Expected deduplicated {file2} in zip")
+
+                # Read EXPORT_MANIFEST.txt
+                manifest_path = "Aura_Academy/EXPORT_MANIFEST.txt"
+                self.assertIn(manifest_path, namelist)
+                manifest_content = zf.read(manifest_path).decode("utf-8")
+
+                # Verify both duplicate filenames appear in EXPORT_MANIFEST.txt
+                self.assertIn("SectionA_dela_Cruz_Juan_8R.jpg", manifest_content)
+                self.assertIn("SectionA_dela_Cruz_Juan_8R_2.jpg", manifest_content)
+                # Verify DPI warnings are in manifest
+                self.assertIn("DPI WARNING", manifest_content)
+
+        finally:
+            shutil.rmtree(str(project_store.get_project_dir(proj_id)), ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -49,6 +49,7 @@ export const UploadView: React.FC<UploadViewProps> = ({
     setFileCount(validFiles.length);
     setStatusMessage(`Uploading ${validFiles.length} photos and caching neural features...`);
 
+    try {
       await apiClient.batchUpload(validFiles, projectId, (completed, total, pct) => {
         setProgress(pct);
         setStatusMessage(`Uploading: ${completed} of ${total} photos completed (${pct}%)...`);

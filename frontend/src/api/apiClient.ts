@@ -375,6 +375,10 @@ export const apiClient = {
     }
   },
 
+  async getJobStatus(jobId: string): Promise<JobStatusResponse> {
+    return this.pollJob(jobId);
+  },
+
   /**
    * Polls an asynchronous job until status is completed or failed
    */
@@ -524,10 +528,15 @@ export const apiClient = {
     excludeOverridden: boolean = true
   ): Promise<{
     success: boolean;
+    job_id?: string;
     project_id: string;
     source_photo_id: string;
+    status?: string;
+    total?: number;
     updated_count: number;
     skipped_count: number;
+    updated_photo_ids?: string[];
+    skipped_photo_ids?: string[];
   }> {
     try {
       const res = await axiosInstance.post(

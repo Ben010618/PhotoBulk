@@ -196,6 +196,8 @@ export interface ProcessedPhotoResponse {
 export interface BatchUploadResponse {
   uploaded_count: number;
   items: PhotoItem[];
+  project_id?: string;
+  job_id?: string;
 }
 
 export interface BatchProcessResponse {
