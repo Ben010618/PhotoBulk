@@ -473,7 +473,8 @@ def process_complete_workflow(
                 "iron_strength": iron_strength,
                 "loose_hair_cleanup": loose_hair_cleanup or 0.40,
                 "keep_moles": keep_moles
-            }
+            },
+            subject_mask=subject_mask
         )
 
     actual_latency_ms = max(1, int((time.time() - start_time) * 1000))

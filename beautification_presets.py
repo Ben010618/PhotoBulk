@@ -528,7 +528,8 @@ def apply_beauty_preset_to_image(
     preset_id: str = "natural",
     custom_adjustments: Optional[Dict[str, Any]] = None,
     ai_config: Optional[Dict[str, Any]] = None,
-    precomputed_masks: Optional[Dict[str, np.ndarray]] = None
+    precomputed_masks: Optional[Dict[str, np.ndarray]] = None,
+    subject_mask: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """
     Main entry point for high-end studio portrait beautification.
@@ -623,9 +624,17 @@ def apply_beauty_preset_to_image(
     lighting_temp = preset_dict.get("lighting_temp", "neutral_5500k")
     studio_light = float(preset_dict.get("studio_light_intensity", 0.18))
     rim_boost = float(preset_dict.get("rim_light_boost", 0.15))
+    effective_subject_mask = subject_mask
+    if effective_subject_mask is None:
+        effective_subject_mask = cv2.bitwise_or(skin_mask, cloth_mask)
+        if "hair" in masks:
+            effective_subject_mask = cv2.bitwise_or(effective_subject_mask, masks["hair"])
+        if "hat" in masks:
+            effective_subject_mask = cv2.bitwise_or(effective_subject_mask, hat_mask)
+
     base = apply_studio_environment_lighting(
         base,
-        subject_mask=None,
+        subject_mask=effective_subject_mask,
         lighting_temp=lighting_temp,
         studio_light_intensity=studio_light,
         rim_light_boost=rim_boost,

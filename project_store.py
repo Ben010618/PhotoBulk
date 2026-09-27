@@ -408,7 +408,8 @@ class ProjectStore:
                 face_info=preview_face_info,
                 preset_id=preset_id,
                 custom_adjustments=active_settings,
-                precomputed_masks=preview_masks
+                precomputed_masks=preview_masks,
+                subject_mask=alpha_preview
             )
         else:
             # Skip facial steps, execute studio lighting
@@ -524,7 +525,8 @@ class ProjectStore:
                 face_info=face_info,
                 preset_id=preset_id,
                 custom_adjustments=active_settings,
-                precomputed_masks=full_masks
+                precomputed_masks=full_masks,
+                subject_mask=alpha_mask
             )
         else:
             lighting_temp = active_settings.get("lighting_temp", "neutral_5500k")
