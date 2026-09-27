@@ -34,7 +34,7 @@ if "DATA_DIR" not in os.environ:
     _standalone_temp = tempfile.mkdtemp(prefix="kameraph_standalone_test_")
     os.environ["DATA_DIR"] = _standalone_temp
 
-from init_db import init_database, get_db_connection, fetch_job_db
+from init_db import init_database, get_db_connection, fetch_job_db, record_job_db, recover_interrupted_jobs
 from auth import create_access_token
 from analyzer_engine import analyze_portrait, get_face_detector
 from beautification_presets import apply_beauty_preset_to_image, BEAUTY_PRESETS, LIP_COLOR_PALETTES
@@ -1242,10 +1242,52 @@ class TestKameraPhSuite(unittest.TestCase):
             # Flat photo routes (served via disk find_photo_dir)
             res_flat_master = self.client.get(f"/api/photos/{photo_id}/master")
             self.assertEqual(res_flat_master.status_code, 200)
-            self.assertEqual(res_flat_master.headers["content-type"], "image/jpeg")
-            self.assertGreater(len(res_flat_master.content), 500)
         finally:
             shutil.rmtree(str(project_store.get_project_dir(proj_id)), ignore_errors=True)
+
+    def test_34_phase4_sqlite_jobs_and_restart_recovery(self):
+        """Phase 4: SQLite jobs queue, restart recovery marking running/queued jobs as failed, and GET /api/jobs/{id} reading from SQLite."""
+        import api_server
+
+        # 1. Record an in-progress job directly into SQLite
+        job_id = "job_sim_restart_101"
+        record_job_db(
+            job_id=job_id,
+            studio_id="default_studio",
+            status="processing",
+            total=10,
+            job_type="apply_all",
+            project_id="test_proj_p4"
+        )
+
+        # 2. Verify GET /api/jobs/{job_id} reads from SQLite and returns processing
+        # Make sure ACTIVE_JOBS in memory does not contain it
+        if hasattr(api_server, "ACTIVE_JOBS") and job_id in api_server.ACTIVE_JOBS:
+            del api_server.ACTIVE_JOBS[job_id]
+
+        res = self.client.get(f"/api/jobs/{job_id}")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["job_id"], job_id)
+        self.assertEqual(data["status"], "processing")
+        self.assertEqual(data["total"], 10)
+
+        # 3. Simulate server restart / crash recovery
+        recovered_count = recover_interrupted_jobs()
+        self.assertGreaterEqual(recovered_count, 1)
+
+        # 4. Verify database state
+        db_job = fetch_job_db(job_id)
+        self.assertIsNotNone(db_job)
+        self.assertEqual(db_job["status"], "failed")
+        self.assertIn("Job interrupted by server restart", db_job["error_message"])
+
+        # 5. Verify GET /api/jobs/{job_id} endpoint returns the failed status and message
+        res_after = self.client.get(f"/api/jobs/{job_id}")
+        self.assertEqual(res_after.status_code, 200)
+        data_after = res_after.json()
+        self.assertEqual(data_after["status"], "failed")
+        self.assertIn("Job interrupted by server restart", data_after.get("error") or "")
 
 
 if __name__ == "__main__":

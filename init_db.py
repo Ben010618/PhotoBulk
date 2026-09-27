@@ -13,13 +13,25 @@ import bcrypt
 from typing import Optional, Dict, Any, List
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "kameraph.db")
+
+def get_db_path() -> str:
+    """Resolves database file path, honoring DATABASE_PATH or DATA_DIR environment variables for tests."""
+    if "DATABASE_PATH" in os.environ:
+        return os.environ["DATABASE_PATH"]
+    if "DATA_DIR" in os.environ:
+        return os.path.join(os.environ["DATA_DIR"], "kameraph.db")
+    return os.path.join(BASE_DIR, "kameraph.db")
+
+DB_PATH = get_db_path()
 DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{DB_PATH}")
 
 
 def get_db_connection():
-    """Returns a SQLite database connection with row factory enabled."""
-    conn = sqlite3.connect(DB_PATH)
+    """Returns a SQLite database connection with row factory and WAL mode enabled for concurrent reads."""
+    target_path = get_db_path()
+    conn = sqlite3.connect(target_path)
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -171,6 +183,7 @@ def init_database():
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         studio_id TEXT NOT NULL,
+        project_id TEXT,
         job_type TEXT NOT NULL DEFAULT 'batch_process',
         status TEXT NOT NULL DEFAULT 'queued',
         progress_percentage INTEGER DEFAULT 0,
@@ -181,6 +194,12 @@ def init_database():
         FOREIGN KEY (studio_id) REFERENCES studios(id) ON DELETE CASCADE
     );
     """)
+
+    # Migration guard: ensure project_id column exists
+    cursor.execute("PRAGMA table_info(jobs);")
+    job_cols = [col["name"] for col in cursor.fetchall()]
+    if "project_id" not in job_cols:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN project_id TEXT;")
 
     conn.commit()
 
@@ -242,17 +261,28 @@ def init_database():
     return DB_PATH
 
 
-def record_job_db(job_id: str, studio_id: str, status: str = "queued", total: int = 0) -> None:
-    """Inserts an initial job record into database."""
+def record_job_db(
+    job_id: str,
+    studio_id: str,
+    status: str = "queued",
+    total: int = 0,
+    job_type: str = "batch_process",
+    project_id: Optional[str] = None
+) -> None:
+    """Inserts or updates an initial job record into SQLite database."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         cursor.execute("""
-            INSERT INTO jobs (id, created_at, updated_at, studio_id, job_type, status, progress_percentage, total_items, processed_items)
-            VALUES (?, ?, ?, ?, 'batch_process', ?, 0, ?, 0)
-            ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, status = excluded.status;
-        """, (job_id, now, now, studio_id, status, total))
+            INSERT INTO jobs (id, created_at, updated_at, studio_id, project_id, job_type, status, progress_percentage, total_items, processed_items)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0)
+            ON CONFLICT(id) DO UPDATE SET
+                updated_at = excluded.updated_at,
+                status = excluded.status,
+                project_id = COALESCE(excluded.project_id, jobs.project_id),
+                job_type = COALESCE(excluded.job_type, jobs.job_type);
+        """, (job_id, now, now, studio_id, project_id, job_type, status, total))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -296,6 +326,32 @@ def fetch_job_db(job_id: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print("[init_db] Notice fetching job from DB:", e)
     return None
+
+
+def recover_interrupted_jobs() -> int:
+    """
+    Recovers any jobs interrupted by server restart/crash:
+    Marks any jobs in SQLite table with status 'running', 'processing', or 'queued'
+    as 'failed' with message 'Job interrupted by server restart'.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cursor.execute("""
+            UPDATE jobs
+            SET status = 'failed',
+                error_message = 'Job interrupted by server restart',
+                updated_at = ?
+            WHERE status IN ('running', 'processing', 'queued');
+        """, (now,))
+        count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return count
+    except Exception as e:
+        print("[init_db] Notice recovering interrupted jobs:", e)
+        return 0
 
 
 if __name__ == "__main__":

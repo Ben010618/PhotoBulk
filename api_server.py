@@ -52,7 +52,8 @@ from init_db import (
     init_database,
     record_job_db,
     update_job_db,
-    fetch_job_db
+    fetch_job_db,
+    recover_interrupted_jobs
 )
 from config import PAYMENTS_ENABLED, check_jwt_secret_security
 from auth import get_current_user, get_current_user_optional, require_admin, authenticate_user, create_access_token
@@ -135,6 +136,10 @@ from contextlib import asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager: runs startup and shutdown security checks."""
     check_jwt_secret_security()
+    # Mark any jobs interrupted by a previous crash or server restart as failed
+    recovered = recover_interrupted_jobs()
+    if recovered > 0:
+        logger.warning(f"[StartupRecovery] Marked {recovered} interrupted job(s) as failed.")
     yield
 
 app = FastAPI(title="KameraPh Studio Engine API", version="5.2.0", lifespan=lifespan)
@@ -981,7 +986,14 @@ async def batch_upload_endpoint(
     job_id = None
     if new_photo_ids:
         job_id = f"job_analysis_{target_project}_{int(time.time()*1000)}"
-        record_job_db(job_id=job_id, studio_id=studio_id, status="processing", total=len(new_photo_ids))
+        record_job_db(
+            job_id=job_id,
+            studio_id=studio_id,
+            status="processing",
+            total=len(new_photo_ids),
+            job_type="upload",
+            project_id=target_project
+        )
         ACTIVE_JOBS[job_id] = {
             "job_id": job_id,
             "project_id": target_project,
@@ -1040,25 +1052,44 @@ async def batch_upload_endpoint(
 
 @app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job_status(job_id: str):
-    """Polls live status, progress percentage, and results of asynchronous background jobs."""
+    """Polls live status, progress percentage, and results of asynchronous background jobs directly from database."""
+    db_job = fetch_job_db(job_id)
+    if db_job:
+        items = None
+        if db_job.get("result_json"):
+            try:
+                parsed = json.loads(db_job["result_json"])
+                if isinstance(parsed, list):
+                    items = parsed
+                elif isinstance(parsed, dict) and "items" in parsed:
+                    items = parsed["items"]
+            except Exception:
+                pass
+
+        created_ts = time.time()
+        if db_job.get("created_at"):
+            try:
+                created_ts = datetime.datetime.fromisoformat(db_job["created_at"]).timestamp()
+            except Exception:
+                pass
+
+        return JobStatusResponse(
+            job_id=db_job["id"],
+            status=db_job["status"],
+            progress=db_job["progress_percentage"],
+            total=db_job["total_items"],
+            processed=db_job["processed_items"],
+            created_at=created_ts,
+            error=db_job.get("error_message"),
+            items=items
+        )
+
+    # In-memory fallback
     job = ACTIVE_JOBS.get(job_id)
     if job:
         return JobStatusResponse(**job)
 
-    # Fallback to database for historical / persisted jobs
-    db_job = fetch_job_db(job_id)
-    if not db_job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    return JobStatusResponse(
-        job_id=db_job["id"],
-        status=db_job["status"],
-        progress=db_job["progress_percentage"],
-        total=db_job["total_items"],
-        processed=db_job["processed_items"],
-        created_at=time.time(),
-        error=db_job.get("error_message")
-    )
+    raise HTTPException(status_code=404, detail="Job not found")
 
 
 @app.get("/api/jobs/{job_id}/stream")
@@ -1284,6 +1315,14 @@ def trigger_project_export(
     if not photos:
         raise HTTPException(status_code=400, detail="Cannot export an empty project")
 
+    record_job_db(
+        job_id=export_id,
+        studio_id=studio_id,
+        status="processing",
+        total=len(photos),
+        job_type="export",
+        project_id=project_id
+    )
     ACTIVE_JOBS[export_id] = {
         "job_id": export_id,
         "project_id": project_id,
@@ -1293,7 +1332,8 @@ def trigger_project_export(
         "processed": 0,
         "message": "Initializing export pipeline...",
         "result": None,
-        "error": None
+        "error": None,
+        "created_at": time.time()
     }
 
     def _export_worker():
@@ -1304,6 +1344,7 @@ def trigger_project_export(
                     ACTIVE_JOBS[export_id]["progress"] = pct
                     ACTIVE_JOBS[export_id]["processed"] = processed
                     ACTIVE_JOBS[export_id]["message"] = msg
+                update_job_db(job_id=export_id, status="processing", progress=pct, processed=processed)
 
             res = execute_bulk_export(
                 project_id=project_id,
@@ -1317,15 +1358,19 @@ def trigger_project_export(
                 progress_callback=_prog
             )
 
-            ACTIVE_JOBS[export_id]["status"] = "completed"
-            ACTIVE_JOBS[export_id]["progress"] = 100
-            ACTIVE_JOBS[export_id]["message"] = "Export package ready"
-            ACTIVE_JOBS[export_id]["result"] = res
+            if export_id in ACTIVE_JOBS:
+                ACTIVE_JOBS[export_id]["status"] = "completed"
+                ACTIVE_JOBS[export_id]["progress"] = 100
+                ACTIVE_JOBS[export_id]["message"] = "Export package ready"
+                ACTIVE_JOBS[export_id]["result"] = res
+            update_job_db(job_id=export_id, status="completed", progress=100, processed=len(photos), result_json=json.dumps(res))
         except Exception as exc:
             logger.error(f"Bulk export error: {exc}\n{traceback.format_exc()}")
-            ACTIVE_JOBS[export_id]["status"] = "failed"
-            ACTIVE_JOBS[export_id]["message"] = str(exc)
-            ACTIVE_JOBS[export_id]["error"] = str(exc)
+            if export_id in ACTIVE_JOBS:
+                ACTIVE_JOBS[export_id]["status"] = "failed"
+                ACTIVE_JOBS[export_id]["message"] = str(exc)
+                ACTIVE_JOBS[export_id]["error"] = str(exc)
+            update_job_db(job_id=export_id, status="failed", progress=0, processed=0, error=str(exc))
 
     background_tasks.add_task(_export_worker)
     return {
@@ -1343,9 +1388,28 @@ def get_export_status(
     check_project_ownership(project_id, current_user)
     validate_id(export_id, "export_id")
     job = ACTIVE_JOBS.get(export_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Export job not found")
-    return job
+    if job:
+        return job
+    db_job = fetch_job_db(export_id)
+    if db_job:
+        res = None
+        if db_job.get("result_json"):
+            try:
+                res = json.loads(db_job["result_json"])
+            except Exception:
+                pass
+        return {
+            "job_id": db_job["id"],
+            "project_id": project_id,
+            "status": db_job["status"],
+            "progress": db_job["progress_percentage"],
+            "total": db_job["total_items"],
+            "processed": db_job["processed_items"],
+            "message": "Export package ready" if db_job["status"] == "completed" else db_job.get("error_message"),
+            "result": res,
+            "error": db_job.get("error_message")
+        }
+    raise HTTPException(status_code=404, detail="Export job not found")
 
 @app.get("/api/projects/{project_id}/exports/{export_id}/download")
 def download_export_zip(

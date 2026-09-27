@@ -50,4 +50,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
 # Launch production server with Uvicorn
-CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Running with 1 worker ensures that in-process threadpools and background queues do not compete
+# or create SQLite file-lock contention during intensive portrait rendering and export pipelines.
+CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

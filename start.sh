@@ -60,4 +60,5 @@ elif command -v xdg-open &>/dev/null; then
 fi
 
 echo "Starting KameraPh Uvicorn API Server on $URL..."
-exec $PYTHON_CMD -m uvicorn api_server:app --host "$HOST" --port "$PORT" --reload
+# Single worker configuration prevents concurrent multi-process contention over SQLite job queue and local image rendering pipelines
+exec $PYTHON_CMD -m uvicorn api_server:app --host "$HOST" --port "$PORT" --workers 1
