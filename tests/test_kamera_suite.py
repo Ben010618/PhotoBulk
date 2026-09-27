@@ -1399,6 +1399,84 @@ class TestKameraPhSuite(unittest.TestCase):
         finally:
             shutil.rmtree(str(project_store.get_project_dir(proj_id)), ignore_errors=True)
 
+    def test_36_phase6_output_quality_exposure_and_specs(self):
+        """Phase 6: 2x2 ID DFA/PRC plain white bg, auto-exposure to target L*, preset/backdrop validation, comparison sheet."""
+        import time
+        import shutil
+        from project_store import project_store
+        from beautification_presets import BEAUTY_PRESETS
+        from background_engine import STUDIO_BACKDROPS
+        from export_engine import generate_comparison_sheet
+        from pipeline import crop_2x2_id, get_subject_mask, process_complete_workflow
+
+        # 1. 2x2 ID Output: Plain white background by default, 70-80% head height, corner pixels near white
+        face_info = {"bbox": [178, 62, 89, 113]}
+        mask = get_subject_mask(self.astronaut_bgr, face_info)
+        crop2x2 = crop_2x2_id(self.astronaut_bgr, face_info=face_info, white_background=True, mask=mask)
+        self.assertEqual(crop2x2.shape, (600, 600, 3))
+
+        # Check background corner pixels are pure white (255) or near white (> 245)
+        top_left = crop2x2[10, 10]
+        top_right = crop2x2[10, 590]
+        self.assertGreaterEqual(int(np.mean(top_left)), 245, "2x2 top-left corner must be near white")
+        self.assertGreaterEqual(int(np.mean(top_right)), 245, "2x2 top-right corner must be near white")
+
+        # 2. Auto Exposure: Bring underexposed darkened astronaut into target luminance range (L* ~ 55 to 68)
+        dark_img = self.astronaut_dark.copy()
+        analysis_before = analyze_portrait(dark_img)
+        self.assertLess(analysis_before["face_exposure"], 100.0, "Darkened astronaut must be underexposed (< 100)")
+
+        enhanced_bgr, _, _, _ = process_complete_workflow(
+            dark_img,
+            analysis_data=analysis_before,
+            beauty_preset="natural"
+        )
+        analysis_after = analyze_portrait(enhanced_bgr)
+        after_exp = analysis_after["face_exposure"]
+        # Convert OpenCV LAB L (0-255) to L* (0-100)
+        l_star = (after_exp / 255.0) * 100.0
+        self.assertGreaterEqual(l_star, 52.0, f"Target L* must be at least 52.0 for balanced portrait, got {l_star:.1f}")
+        self.assertLessEqual(l_star, 72.0, f"Target L* must not exceed 72.0 to avoid bleaching, got {l_star:.1f}")
+
+        # 3. Default Settings & Unknown ID Rejection (400)
+        proj_id = f"test_phase6_{int(time.time()*1000)}"
+        token = create_access_token({"id": "u_p6", "email": "p6@test.ph", "role": "studio_admin", "studio_id": "studio_p6"})
+        project_store.get_or_create_project(proj_id, title="Phase 6 Validation", studio_id="studio_p6")
+
+        try:
+            meta = project_store.save_uploaded_photo(proj_id, "p_val", "valid.jpg", self.astronaut_bgr)
+            default_settings = project_store.load_json(project_store.get_photo_dir(proj_id, "p_val") / "settings.json")
+            # Verify default IDs exist in registries
+            self.assertIn(default_settings["preset_id"], BEAUTY_PRESETS)
+            self.assertIn(default_settings["backdrop_type"], STUDIO_BACKDROPS)
+
+            # Attempt update with unknown preset_id -> must return 400
+            res_bad_preset = self.client.post(
+                f"/api/projects/{proj_id}/photos/p_val/settings",
+                json={"settings": {"preset_id": "alien_glow"}, "is_user_override": True},
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            self.assertEqual(res_bad_preset.status_code, 400)
+
+            # Attempt update with unknown backdrop_type -> must return 400
+            res_bad_bg = self.client.post(
+                f"/api/projects/{proj_id}/photos/p_val/settings",
+                json={"settings": {"backdrop_type": "neon_disco"}, "is_user_override": True},
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            self.assertEqual(res_bad_bg.status_code, 400)
+
+            # 4. Save Before/After comparison sheet under demo_output/
+            comp_path = generate_comparison_sheet(
+                image_bgr=self.astronaut_bgr,
+                output_path="demo_output/before_after_comparison.jpg"
+            )
+            self.assertTrue(os.path.exists(comp_path))
+            self.assertGreater(os.path.getsize(comp_path), 10000, "Comparison sheet must be a non-trivial JPEG file")
+
+        finally:
+            shutil.rmtree(str(project_store.get_project_dir(proj_id)), ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

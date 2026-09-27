@@ -255,7 +255,14 @@ def _render_and_export_photo_task(task_args: Dict[str, Any]) -> Dict[str, Any]:
             crop_wal = crop_aspect(master_bgr, 5.0, 7.0)
             save_jpeg_with_profile(crop_wal, out_p, target_size=PRINT_SIZES_300DPI["wallet"], dpi=300, quality=95)
         elif out_key == "2x2":
-            crop2x2 = crop_2x2_id(master_bgr, face_info)
+            orig_p = project_store.get_photo_dir(project_id, pid) / "original.jpg"
+            subj_for_id = cv2.imread(str(orig_p)) if orig_p.exists() else master_bgr
+            crop2x2 = crop_2x2_id(
+                subj_for_id,
+                face_info,
+                white_background=True,
+                mask=features.get("subject_mask")
+            )
             save_jpeg_with_profile(crop2x2, out_p, target_size=PRINT_SIZES_300DPI["2x2"], dpi=300, quality=95)
         elif out_key == "web":
             h, w = master_bgr.shape[:2]
@@ -488,3 +495,56 @@ def execute_bulk_export(
         "dpi_warnings": dpi_warnings,
         "manifest": manifest_text
     }
+
+
+def generate_comparison_sheet(
+    image_bgr: Optional[np.ndarray] = None,
+    output_path: str = "demo_output/before_after_comparison.jpg"
+) -> str:
+    """
+    Generates a high-resolution before/after verification sheet under demo_output/:
+      Panel 1: BEFORE (Underexposed Source)
+      Panel 2: AFTER (Auto-Exposure + Studio Grading)
+      Panel 3: PRC/DFA 2x2 Official ID (Pure White Bg, 70-80% head)
+    """
+    import skimage.data
+    from pipeline import process_complete_workflow, get_subject_mask
+
+    if image_bgr is None:
+        image_bgr = cv2.cvtColor(skimage.data.astronaut(), cv2.COLOR_RGB2BGR)
+
+    dark = cv2.convertScaleAbs(image_bgr, alpha=0.45, beta=0)
+
+    # 1. Enhanced version
+    enhanced, _, face_info, _ = process_complete_workflow(
+        dark, beauty_preset="natural", backdrop_type="classic_blue"
+    )
+
+    # 2. 2x2 ID version
+    mask = get_subject_mask(image_bgr, face_info)
+    id_2x2 = crop_2x2_id(image_bgr, face_info=face_info, white_background=True, mask=mask)
+
+    p1 = cv2.resize(dark, (600, 600))
+    p2 = cv2.resize(enhanced, (600, 600))
+    p3 = id_2x2
+
+    header_h = 80
+    sheet_w = 600 * 3
+    sheet_h = 600 + header_h
+    sheet = np.full((sheet_h, sheet_w, 3), 22, dtype=np.uint8)
+
+    cv2.putText(sheet, "BEFORE: Underexposed Input", (35, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (200, 200, 200), 2)
+    cv2.putText(sheet, "AFTER: Auto-Exposure & Studio Grading", (635, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (80, 220, 100), 2)
+    cv2.putText(sheet, "PRC/DFA 2x2 ID: Pure White Bg", (1235, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 200, 80), 2)
+
+    sheet[header_h:, 0:600] = p1
+    sheet[header_h:, 600:1200] = p2
+    sheet[header_h:, 1200:1800] = p3
+
+    cv2.line(sheet, (600, 0), (600, sheet_h), (60, 60, 60), 2)
+    cv2.line(sheet, (1200, 0), (1200, sheet_h), (60, 60, 60), 2)
+
+    out_p = Path(output_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_p), sheet, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    return str(out_p)

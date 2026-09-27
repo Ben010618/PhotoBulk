@@ -165,23 +165,23 @@ class ProjectStore:
         preview_path = photo_dir / "preview.jpg"
         cv2.imwrite(str(preview_path), preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
 
-        # 3. Initialize settings.json
+        # 3. Initialize settings.json with valid default IDs
         settings = custom_settings or {
-            "preset_id": "morena_radiant",
-            "skin_smoothing": 0.65,
-            "blemish_cut": 0.70,
-            "dark_spot_whitening": 0.50,
-            "shine_reduction": 0.35,
+            "preset_id": "natural",
+            "skin_smoothing": 0.50,
+            "blemish_cut": 0.60,
+            "dark_spot_whitening": 0.40,
+            "shine_reduction": 0.30,
             "lip_color": "#d87093",
-            "lip_intensity": 0.35,
-            "glow_intensity": 0.35,
-            "eye_catchlight": 0.35,
-            "teeth_whitening": 0.45,
+            "lip_intensity": 0.0,
+            "glow_intensity": 0.20,
+            "eye_catchlight": 0.20,
+            "teeth_whitening": 0.40,
             "lighting_temp": "neutral_5500k",
             "studio_light_intensity": 0.20,
-            "rim_light_boost": 0.20,
+            "rim_light_boost": 0.18,
             "bg_replacement_enabled": True,
-            "backdrop_type": "royal_navy",
+            "backdrop_type": "classic_blue",
             "has_user_override": False
         }
         self.save_json(photo_dir / "settings.json", settings)
@@ -372,7 +372,7 @@ class ProjectStore:
         # 2. Smart Auto-Corrections (Batch Harmonization: Exposure & White Balance)
         ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
         if abs(ev) >= 0.10:
-            factor = float(np.clip(2.0 ** (ev * 0.75), 0.70, 1.45))
+            factor = float(np.clip(2.0 ** ev, 0.50, 2.80))
             subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
 
         # Auto White-Balance Harmonization
@@ -401,7 +401,7 @@ class ProjectStore:
                 logger.warning(f"Notice loading masks.npz for {photo_id}: {e}")
 
         # 3. Fast Beauty & Lighting
-        preset_id = active_settings.get("preset_id", "morena_radiant")
+        preset_id = active_settings.get("preset_id", "natural")
         if preview_face_info is not None:
             enhanced_preview = apply_beauty_preset_to_image(
                 subject_isolated,
@@ -488,7 +488,7 @@ class ProjectStore:
         # 2. Smart Auto-Corrections (Exposure & Tone & WB Harmonization)
         ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
         if abs(ev) >= 0.10:
-            factor = float(np.clip(2.0 ** (ev * 0.75), 0.70, 1.45))
+            factor = float(np.clip(2.0 ** ev, 0.50, 2.80))
             subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
 
         # Auto White-Balance Harmonization
@@ -517,7 +517,7 @@ class ProjectStore:
                 logger.warning(f"Notice loading full masks.npz for {photo_id}: {e}")
 
         # 3. Beauty & Studio Lighting
-        preset_id = active_settings.get("preset_id", "morena_radiant")
+        preset_id = active_settings.get("preset_id", "natural")
         if face_info is not None:
             enhanced_bgr = apply_beauty_preset_to_image(
                 subject_isolated,
@@ -570,6 +570,20 @@ class ProjectStore:
         is_user_override: bool = True
     ) -> Dict[str, Any]:
         """Saves custom settings for a specific photo and marks it as user-overridden."""
+        from beautification_presets import BEAUTY_PRESETS
+        from background_engine import STUDIO_BACKDROPS
+
+        if "preset_id" in settings and settings["preset_id"] not in BEAUTY_PRESETS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown preset_id: '{settings['preset_id']}'. Valid presets: {list(BEAUTY_PRESETS.keys())}"
+            )
+        if "backdrop_type" in settings and settings["backdrop_type"] not in STUDIO_BACKDROPS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown backdrop_type: '{settings['backdrop_type']}'. Valid backdrops: {list(STUDIO_BACKDROPS.keys())}"
+            )
+
         photo_dir = self.get_photo_dir(project_id, photo_id)
         current = self.load_json(photo_dir / "settings.json") or {}
         updated = {**current, **settings, "has_user_override": is_user_override}

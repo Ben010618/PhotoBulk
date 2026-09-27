@@ -243,25 +243,45 @@ def crop_8r_aspect(img_bgr: np.ndarray) -> np.ndarray:
         return img_bgr[start_y:start_y + new_h, :]
 
 
-def crop_2x2_id(img_bgr: np.ndarray, face_info: Optional[Dict[str, Any]] = None, spec: str = "DFA") -> np.ndarray:
+def crop_2x2_id(
+    img_bgr: np.ndarray,
+    face_info: Optional[Dict[str, Any]] = None,
+    spec: str = "DFA",
+    white_background: bool = True,
+    mask: Optional[np.ndarray] = None
+) -> np.ndarray:
     """
     Crops portrait to Philippine 2x2 ID standard (600x600 px at 300 DPI).
     Conforms to DFA Passport and PRC Professional Regulation Commission specifications:
+      - Plain white background by default (PRC/DFA spec).
+      - No skin smoothing or reshaping.
       - Head height (crown to chin) occupies 70% to 80% of vertical frame.
-      - Eye level positioned 58% to 62% above bottom margin.
       - Head centered horizontally.
     """
     h, w = img_bgr.shape[:2]
     target_dim = 600
 
+    working_img = img_bgr.copy()
+    if white_background:
+        if mask is None:
+            try:
+                mask = get_subject_mask(working_img, face_info)
+            except Exception:
+                mask = None
+        if mask is not None:
+            if mask.shape[:2] != (h, w):
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+            alpha = (mask.astype(np.float32) / 255.0)[..., None]
+            working_img = (working_img.astype(np.float32) * alpha + 255.0 * (1.0 - alpha)).clip(0, 255).astype(np.uint8)
+
     if face_info and 'bbox' in face_info:
         fx, fy, fw, fh = face_info['bbox']
-        # For DFA/PRC, crown is roughly 20% above bounding box top; chin is at bottom
+        # For DFA/PRC, crown is roughly 25% above bounding box top; chin is at bottom
         chin_y = fy + fh
         crown_y = max(0, fy - int(fh * 0.25))
         head_height = max(10, chin_y - crown_y)
 
-        # Target 75% head height inside crop
+        # Target 75% head height inside crop (PRC/DFA 70-80% standard)
         target_box_size = int(head_height / 0.75)
         
         # Center horizontally on face center
@@ -277,15 +297,15 @@ def crop_2x2_id(img_bgr: np.ndarray, face_info: Optional[Dict[str, Any]] = None,
         if crop_y1 + target_box_size > h:
             crop_y1 = max(0, h - target_box_size)
             
-        crop_box = img_bgr[crop_y1:crop_y1 + target_box_size, crop_x1:crop_x1 + target_box_size]
+        crop_box = working_img[crop_y1:crop_y1 + target_box_size, crop_x1:crop_x1 + target_box_size]
     else:
         box_size = min(w, h)
         crop_y1 = max(0, int(h * 0.05))
         crop_x1 = max(0, (w - box_size) // 2)
-        crop_box = img_bgr[crop_y1:crop_y1 + box_size, crop_x1:crop_x1 + box_size]
+        crop_box = working_img[crop_y1:crop_y1 + box_size, crop_x1:crop_x1 + box_size]
 
     if crop_box.size == 0:
-        crop_box = cv2.resize(img_bgr, (target_dim, target_dim))
+        crop_box = cv2.resize(working_img, (target_dim, target_dim))
     else:
         crop_box = cv2.resize(crop_box, (target_dim, target_dim), interpolation=cv2.INTER_LANCZOS4)
 
@@ -415,7 +435,7 @@ def process_complete_workflow(
         auto_c = analysis["auto_corrections"]
         ev = float(auto_c.get("exposure_compensation_ev", 0.0))
         if abs(ev) >= 0.10:
-            factor = float(np.clip(2.0 ** (ev * 0.75), 0.70, 1.45))
+            factor = float(np.clip(2.0 ** ev, 0.50, 2.80))
             subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
 
     # 5. Skin Beautification, Melanin Radiance & Garment De-creasing
