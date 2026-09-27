@@ -421,7 +421,7 @@ def recolor_lips_neural(img_f, r_mouth, l_mouth, fw, fh, lip_color_hex="#d87093"
     mouth_cx = (int(r_mouth[0]) + int(l_mouth[0])) // 2
     mouth_cy = (int(r_mouth[1]) + int(l_mouth[1])) // 2
     lip_mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.ellipse(lip_mask, (mouth_cx, mouth_cy), (int(fw * 0.22), int(fh * 0.10)), 0, 0, 360, 255, -1)
+    cv2.ellipse(lip_mask, (int(mouth_cx), int(mouth_cy)), (max(1, int(fw * 0.22)), max(1, int(fh * 0.10))), 0, 0, 360, 255, -1)
     return enhance_lips_natural(img_f, lip_mask, lip_enhancement=0.30, lip_color_hex=lip_color_hex, lip_intensity=lip_intensity)
 
 

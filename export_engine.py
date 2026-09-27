@@ -68,15 +68,17 @@ def sanitize_filename(name: str) -> str:
 def crop_aspect(img_bgr: np.ndarray, target_w_ratio: float, target_h_ratio: float) -> np.ndarray:
     """Crops portrait to arbitrary aspect ratio, centering horizontally and framing vertically."""
     h, w = img_bgr.shape[:2]
-    target_aspect = float(target_w_ratio) / float(target_h_ratio)
-    current_aspect = float(w) / float(h)
+    if h <= 0 or w <= 0:
+        return img_bgr
+    target_aspect = float(target_w_ratio) / float(max(target_h_ratio, 0.001))
+    current_aspect = float(w) / float(max(h, 1))
 
     if current_aspect > target_aspect:
-        new_w = int(h * target_aspect)
+        new_w = min(w, max(1, int(h * target_aspect)))
         start_x = (w - new_w) // 2
         return img_bgr[:, start_x:start_x + new_w]
     else:
-        new_h = int(w / target_aspect)
+        new_h = min(h, max(1, int(w / max(target_aspect, 0.001))))
         start_y = max(0, int((h - new_h) * 0.20))
         return img_bgr[start_y:start_y + new_h, :]
 

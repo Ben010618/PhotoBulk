@@ -445,6 +445,7 @@ def get_system_config():
 # =========================================================================
 
 @app.get("/api/health")
+@app.get("/health")
 def health_check():
     studio = get_studio_state()
     return {

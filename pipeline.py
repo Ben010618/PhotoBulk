@@ -230,15 +230,17 @@ def get_subject_mask(img_bgr: np.ndarray, face_info: Optional[Dict[str, Any]] = 
 def crop_8r_aspect(img_bgr: np.ndarray) -> np.ndarray:
     """Crops portrait to standard 8R / 8x10 yearbook aspect ratio (4:5 vertical)."""
     h, w = img_bgr.shape[:2]
+    if h <= 0 or w <= 0:
+        return img_bgr
     target_aspect = 4.0 / 5.0  # width / height
-    current_aspect = w / float(h)
+    current_aspect = float(w) / float(max(h, 1))
 
     if current_aspect > target_aspect:
-        new_w = int(h * target_aspect)
+        new_w = min(w, max(1, int(h * target_aspect)))
         start_x = (w - new_w) // 2
         return img_bgr[:, start_x:start_x + new_w]
     else:
-        new_h = int(w / target_aspect)
+        new_h = min(h, max(1, int(w / max(target_aspect, 0.001))))
         start_y = max(0, int((h - new_h) * 0.20))
         return img_bgr[start_y:start_y + new_h, :]
 
@@ -304,7 +306,7 @@ def crop_2x2_id(
         crop_x1 = max(0, (w - box_size) // 2)
         crop_box = working_img[crop_y1:crop_y1 + box_size, crop_x1:crop_x1 + box_size]
 
-    if crop_box.size == 0:
+    if crop_box.size == 0 or crop_box.shape[0] == 0 or crop_box.shape[1] == 0:
         crop_box = cv2.resize(working_img, (target_dim, target_dim))
     else:
         crop_box = cv2.resize(crop_box, (target_dim, target_dim), interpolation=cv2.INTER_LANCZOS4)

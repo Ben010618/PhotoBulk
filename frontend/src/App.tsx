@@ -24,6 +24,8 @@ import { BatchFilmstrip } from './components/BatchFilmstrip';
 import { ReviewGrid } from './components/ReviewGrid';
 import { UploadView } from './components/UploadView';
 import { ExportModal } from './components/ExportModal';
+import { TopUpModal } from './components/TopUpModal';
+import { StudentPortal } from './components/StudentPortal/StudentPortal';
 import { ToastContainer } from './components/Common/ToastContainer';
 
 import { api } from './api/client';
@@ -113,6 +115,7 @@ export default function App() {
   const [authInitialMode, setAuthInitialMode] = useState<'signin' | 'signup'>('signin');
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [isTopUpModalOpen, setIsTopUpModalOpen] = useState<boolean>(false);
   const [isApplyingToAll, setIsApplyingToAll] = useState<boolean>(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -457,6 +460,7 @@ export default function App() {
         onNavigate={setCurrentPage}
         currentUser={currentUser}
         onLogout={logout}
+        onOpenTopUp={() => setIsTopUpModalOpen(true)}
       />
 
       {/* Main Page Routing */}
@@ -483,6 +487,10 @@ export default function App() {
 
       {currentPage === 'admin_dashboard' && (
         <AdminPanel onNavigate={setCurrentPage} />
+      )}
+
+      {currentPage === 'student_portal' && (
+        <StudentPortal />
       )}
 
       {currentPage === 'editor' && (
@@ -714,6 +722,18 @@ export default function App() {
         projectId={currentProjectId}
         projectTitle={currentProjectTitle}
         totalPhotos={photos.length}
+      />
+
+      {/* Studio Credit Top Up Modal */}
+      <TopUpModal
+        isOpen={isTopUpModalOpen}
+        onClose={() => setIsTopUpModalOpen(false)}
+        onSuccess={(addedCredits, message) => {
+          if (currentUser) {
+            setCredits((currentUser.credits || 0) + addedCredits);
+          }
+          addToast('success', message);
+        }}
       />
     </div>
   );

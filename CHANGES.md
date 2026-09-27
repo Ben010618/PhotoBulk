@@ -53,3 +53,23 @@ This document summarizes the systematic hardening and stabilization of PhotoBulk
 - **Automated Verification Suite**:
   - Added `test_36_phase6_output_quality_exposure_and_specs`.
   - All 36 automated tests across the test suite pass with 100% success (0 failures, 0 skips).
+
+## Phase 7: Concurrency Hardening, Subsystem Stability & Full App Integration
+- **OpenCV Multi-Threading Heap Safety**:
+  - `cv2.FaceDetectorYN` instances are not thread-safe in C++ and corrupt internal detection buffers when accessed across `ThreadPoolExecutor` worker threads during bulk exports, triggering Windows fatal heap corruptions (`0xc0000374`).
+  - Added thread synchronization (`_DETECTOR_LOCK`) wrapping face detector acquisition and inference in `analyzer_engine.py`, guaranteeing rock-solid concurrent export and preview generation.
+- **Robust OpenCV 4.11+ Coordinate Parsing**:
+  - OpenCV 4.11+ strictly rejects floating-point types (`float`, `np.float64`) for ellipse center coordinates and axes radii in `cv2.ellipse`.
+  - Added explicit `(int(x), int(y))` and `max(2, int(r))` casting across `face_parsing.py` and `beautification_presets.py`.
+- **Low-Light / Underexposure Facial Luminance Fallback**:
+  - When analyzing heavily underexposed portraits where skin tone Cr/Cb falls outside threshold ranges, the skin segmentation mask yielded zero pixels, causing `face_exposure` to default to `128.0` (falsely indicating normal exposure).
+  - Implemented an automatic inner facial ROI luminance fallback when `skin_mask` pixel count is zero, ensuring underexposure is accurately detected and compensated.
+- **Aspect Ratio & Crop Division Safety**:
+  - Added zero-dimension and empty slice guards in `crop_8r_aspect` and `crop_2x2_id` (`pipeline.py`) as well as `crop_aspect` and resolution scalers (`export_engine.py`).
+- **Complete Frontend UI Component Integration**:
+  - Wired `StudentPortal` into `App.tsx` routing (`currentPage === 'student_portal'`) and added an entry point button on the hero banner of `LandingPage.tsx`.
+  - Wired `TopUpModal` with state management in `App.tsx` and hooked it directly to `Navbar` credit top-up click triggers.
+  - Verified clean TypeScript compilation and asset bundling via Vite (`npm run build`).
+- **Health Check Route Coverage**:
+  - Added `@app.get("/health")` endpoint alias in `api_server.py` alongside `/api/health`.
+

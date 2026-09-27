@@ -145,24 +145,29 @@ def _build_geometric_parsing_masks(
             "neck": empty, "hat": empty, "cloth": empty
         }
 
-    fx, fy, fw, fh = face_info['bbox']
-    r_eye = face_info.get('right_eye') or [int(fx + fw * 0.3), int(fy + fh * 0.35)]
-    l_eye = face_info.get('left_eye') or [int(fx + fw * 0.7), int(fy + fh * 0.35)]
-    nose = face_info.get('nose') or [int(fx + fw * 0.5), int(fy + fh * 0.55)]
-    r_mouth = face_info.get('right_mouth') or [int(fx + fw * 0.35), int(fy + fh * 0.75)]
-    l_mouth = face_info.get('left_mouth') or [int(fx + fw * 0.65), int(fy + fh * 0.75)]
+    fx, fy, fw, fh = int(face_info['bbox'][0]), int(face_info['bbox'][1]), int(face_info['bbox'][2]), int(face_info['bbox'][3])
+    r_eye_raw = face_info.get('right_eye')
+    r_eye = (int(r_eye_raw[0]), int(r_eye_raw[1])) if r_eye_raw else (int(fx + fw * 0.3), int(fy + fh * 0.35))
+    l_eye_raw = face_info.get('left_eye')
+    l_eye = (int(l_eye_raw[0]), int(l_eye_raw[1])) if l_eye_raw else (int(fx + fw * 0.7), int(fy + fh * 0.35))
+    nose_raw = face_info.get('nose')
+    nose = (int(nose_raw[0]), int(nose_raw[1])) if nose_raw else (int(fx + fw * 0.5), int(fy + fh * 0.55))
+    r_mouth_raw = face_info.get('right_mouth')
+    r_mouth = (int(r_mouth_raw[0]), int(r_mouth_raw[1])) if r_mouth_raw else (int(fx + fw * 0.35), int(fy + fh * 0.75))
+    l_mouth_raw = face_info.get('left_mouth')
+    l_mouth = (int(l_mouth_raw[0]), int(l_mouth_raw[1])) if l_mouth_raw else (int(fx + fw * 0.65), int(fy + fh * 0.75))
 
     # 1. Eyes Mask
     eyes_mask = np.zeros((h, w), dtype=np.uint8)
-    eye_rx, eye_ry = int(fw * 0.11), int(fh * 0.08)
+    eye_rx, eye_ry = max(2, int(fw * 0.11)), max(2, int(fh * 0.08))
     cv2.ellipse(eyes_mask, (int(r_eye[0]), int(r_eye[1])), (eye_rx, eye_ry), 0, 0, 360, 255, -1)
     cv2.ellipse(eyes_mask, (int(l_eye[0]), int(l_eye[1])), (eye_rx, eye_ry), 0, 0, 360, 255, -1)
 
     # 2. Brows Mask
     brows_mask = np.zeros((h, w), dtype=np.uint8)
     brow_offset_y = int(fh * 0.09)
-    cv2.ellipse(brows_mask, (int(r_eye[0]), int(r_eye[1] - brow_offset_y)), (int(eye_rx * 1.2), int(eye_ry * 0.6)), -5, 0, 360, 255, -1)
-    cv2.ellipse(brows_mask, (int(l_eye[0]), int(l_eye[1] - brow_offset_y)), (int(eye_rx * 1.2), int(eye_ry * 0.6)), 5, 0, 360, 255, -1)
+    cv2.ellipse(brows_mask, (int(r_eye[0]), int(r_eye[1] - brow_offset_y)), (max(2, int(eye_rx * 1.2)), max(2, int(eye_ry * 0.6))), -5, 0, 360, 255, -1)
+    cv2.ellipse(brows_mask, (int(l_eye[0]), int(l_eye[1] - brow_offset_y)), (max(2, int(eye_rx * 1.2)), max(2, int(eye_ry * 0.6))), 5, 0, 360, 255, -1)
 
     # 3. Lips Mask
     lips_mask = np.zeros((h, w), dtype=np.uint8)
@@ -174,9 +179,9 @@ def _build_geometric_parsing_masks(
 
     # 4. Facial Skin & Neck Mask
     skin_mask = np.zeros((h, w), dtype=np.uint8)
-    center_x = fx + fw // 2
-    center_y = fy + int(fh * 0.52)
-    cv2.ellipse(skin_mask, (center_x, center_y), (int(fw * 0.44), int(fh * 0.50)), 0, 0, 360, 255, -1)
+    center_x = int(fx + fw // 2)
+    center_y = int(fy + fh * 0.52)
+    cv2.ellipse(skin_mask, (center_x, center_y), (max(2, int(fw * 0.44)), max(2, int(fh * 0.50))), 0, 0, 360, 255, -1)
 
     # Neck
     neck_mask = np.zeros((h, w), dtype=np.uint8)

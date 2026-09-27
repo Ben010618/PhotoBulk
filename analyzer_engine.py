@@ -15,6 +15,7 @@ import cv2
 import logging
 import traceback
 import numpy as np
+import threading
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, Union
 
@@ -23,6 +24,7 @@ logger = logging.getLogger("kameraph.analyzer_engine")
 BASE_DIR = Path(__file__).resolve().parent
 YUNET_MODEL_PATH = Path(os.getenv("YUNET_MODEL_PATH", BASE_DIR / "face_detection_yunet.onnx"))
 _detector = None
+_DETECTOR_LOCK = threading.Lock()
 
 
 def get_face_detector(input_size: Tuple[int, int] = (640, 640)) -> Optional[cv2.FaceDetectorYN]:
@@ -181,14 +183,15 @@ def analyze_portrait(image_input: Union[np.ndarray, str, Path]) -> Dict[str, Any
     h, w = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    detector = get_face_detector((w, h))
     faces = None
-    if detector is not None:
-        try:
-            _, faces = detector.detect(image)
-        except Exception as det_err:
-            logger.error(f"[analyzer_engine] Face detection error: {det_err}\n{traceback.format_exc()}")
-            faces = None
+    with _DETECTOR_LOCK:
+        detector = get_face_detector((w, h))
+        if detector is not None:
+            try:
+                _, faces = detector.detect(image)
+            except Exception as det_err:
+                logger.error(f"[analyzer_engine] Face detection error: {det_err}\n{traceback.format_exc()}")
+                faces = None
 
     has_face = False
     face_count = 0
@@ -291,26 +294,42 @@ def analyze_portrait(image_input: Union[np.ndarray, str, Path]) -> Dict[str, Any
             if np.any(skin_mask):
                 skin_l = roi_lab[:, :, 0][skin_mask]
                 face_exposure = round(float(np.mean(skin_l)), 1)
-                # Target natural studio skin luminance ~ 155 (scale 0-255, ~61% L*)
-                target_l = 155.0
-                ev_compensation = round(float(np.clip(np.log2(target_l / max(face_exposure, 1.0)), -1.5, 1.5)), 2)
+            else:
+                # Robust fallback for heavily underexposed or shifted skin tones:
+                # measure luminance across the central face ROI
+                inner_l = roi_lab[int(fh * 0.15):int(fh * 0.85), int(fw * 0.15):int(fw * 0.85), 0]
+                if inner_l.size > 0:
+                    face_exposure = round(float(np.mean(inner_l)), 1)
+                else:
+                    face_exposure = round(float(np.mean(roi_lab[:, :, 0])), 1)
 
-                # Skin texture score (amount of fine detail and spots inside the skin mask)
-                skin_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-                g1 = cv2.GaussianBlur(skin_gray, (3, 3), 0)
-                g2 = cv2.GaussianBlur(skin_gray, (9, 9), 0)
-                diff = cv2.absdiff(g1, g2)
+            # Target natural studio skin luminance ~ 155 (scale 0-255, ~61% L*)
+            target_l = 155.0
+            ev_compensation = round(float(np.clip(np.log2(target_l / max(face_exposure, 1.0)), -1.5, 1.5)), 2)
+
+            # Skin texture score (amount of fine detail and spots inside the skin mask)
+            skin_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+            g1 = cv2.GaussianBlur(skin_gray, (3, 3), 0)
+            g2 = cv2.GaussianBlur(skin_gray, (9, 9), 0)
+            diff = cv2.absdiff(g1, g2)
+            if np.any(skin_mask):
                 skin_texture_score = round(float(np.clip(np.mean(diff[skin_mask]) / 10.0, 0.0, 1.0)), 2)
+            else:
+                skin_texture_score = round(float(np.clip(np.mean(diff) / 10.0, 0.0, 1.0)), 2)
 
-                # White balance cast
+            # White balance cast
+            if np.any(skin_mask):
                 delta_b = round(float(np.mean(roi_lab[:, :, 2][skin_mask]) - 145.0), 1)
                 delta_a = round(float(np.mean(roi_lab[:, :, 1][skin_mask]) - 140.0), 1)
-                if delta_b > 12.0:
-                    temp_cast = "warm"
-                elif delta_b < -12.0:
-                    temp_cast = "cool"
-                else:
-                    temp_cast = "neutral"
+            else:
+                delta_b = round(float(np.mean(roi_lab[:, :, 2]) - 145.0), 1)
+                delta_a = round(float(np.mean(roi_lab[:, :, 1]) - 140.0), 1)
+            if delta_b > 12.0:
+                temp_cast = "warm"
+            elif delta_b < -12.0:
+                temp_cast = "cool"
+            else:
+                temp_cast = "neutral"
 
     # 2. Per-photo automatic corrections driven by numbers
     auto_smoothing = round(float(np.clip(0.48 + skin_texture_score * 0.35, 0.40, 0.85)), 2)

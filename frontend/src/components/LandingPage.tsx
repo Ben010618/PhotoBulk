@@ -16,7 +16,8 @@ import {
   Award,
   ChevronRight,
   LogIn,
-  UserPlus
+  UserPlus,
+  GraduationCap
 } from 'lucide-react';
 import { PageView } from './Navbar';
 
@@ -100,6 +101,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
               className="px-5 py-3 rounded text-sm font-medium border border-[#30363d] bg-[#0d1117] text-[#8b949e] hover:text-[#f0f6fc] hover:bg-[#161b22] transition flex items-center gap-2"
             >
               <span>View Dashboard</span>
+            </button>
+
+            <button
+              onClick={() => onNavigate('student_portal')}
+              className="px-5 py-3 rounded text-sm font-medium border border-[#30363d] bg-[#0d1117] text-[#8b949e] hover:text-[#58a6ff] hover:border-[#58a6ff]/50 hover:bg-[#161b22] transition flex items-center gap-2"
+            >
+              <GraduationCap className="w-4 h-4 text-[#58a6ff]" />
+              <span>Student Proof Portal</span>
             </button>
           </div>
 
