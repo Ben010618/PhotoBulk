@@ -87,10 +87,9 @@ axiosInstance.interceptors.response.use(
     // Global 402 Payment Required: Studio credits exhausted (only when payments enabled)
     else if (status === 402 && useUIStore.getState().paymentsEnabled) {
       try {
-        useUIStore.getState().openTopUpModal();
-        useUIStore.getState().addToast('error', 'Studio credits depleted. Please top up your balance to continue.');
+        useUIStore.getState().addToast('error', 'Studio credits depleted.');
       } catch (storeErr: unknown) {
-        console.error('[API Client] Failed to trigger top-up modal on 402:', storeErr);
+        console.error('[API Client] Failed to handle 402:', storeErr);
       }
     }
     // Global 500 Internal Server Error: Display structured error toast
@@ -175,29 +174,6 @@ export const apiClient = {
 
 
 
-  /**
-   * Single Photo Processing
-   */
-  async processPhoto(options: Record<string, string | number | boolean>): Promise<ProcessedPhotoResponse> {
-    try {
-      const formData = new FormData();
-      Object.entries(options).forEach(([k, v]) => {
-        if (v !== undefined && v !== null) {
-          // Map frontend catchlight_boost to backend eye_catchlight
-          const key = k === 'catchlight_boost' ? 'eye_catchlight' : k;
-          formData.append(key, String(v));
-        }
-      });
-
-      const res = await axiosInstance.post<ProcessedPhotoResponse>('/api/process-image', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-      return res.data;
-    } catch (err: unknown) {
-      console.error('[apiClient.processPhoto] Processing error:', err);
-      throw err;
-    }
-  },
 
   /**
    * Cloudflare R2 Direct Edge Storage & Upload Operations
@@ -367,39 +343,6 @@ export const apiClient = {
     };
   },
 
-  async batchProcess(
-    options: Record<string, string | number | boolean>,
-    onProgress?: (progressPct: number, job: JobStatusResponse) => void
-  ): Promise<BatchProcessResponse> {
-    try {
-      const formData = new FormData();
-      Object.entries(options).forEach(([k, v]) => {
-        if (v !== undefined && v !== null) {
-          formData.append(k, String(v));
-        }
-      });
-
-      const res = await axiosInstance.post<BatchProcessResponse | JobStatusResponse>('/api/batch-process', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-
-      // If backend responded with 202 or returned a JobStatusResponse (with job_id):
-      if ('job_id' in res.data && res.data.job_id) {
-        const completedJob = await this.pollJobUntilCompletion(res.data.job_id, onProgress);
-        return {
-          total_processed: completedJob.processed ?? (completedJob.items ? completedJob.items.length : 0),
-          per_photo_latency_ms: completedJob.per_photo_latency_ms ?? 0,
-          studio_credits: completedJob.studio_credits,
-          items: completedJob.items ?? [],
-        };
-      }
-
-      return res.data as BatchProcessResponse;
-    } catch (err: unknown) {
-      console.error('[apiClient.batchProcess] Batch processing failed:', err);
-      throw err;
-    }
-  },
 
   /**
    * PayMongo Payment & Top-Up

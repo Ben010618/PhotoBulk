@@ -80,6 +80,24 @@ class ProjectStore:
         photo_dir.mkdir(parents=True, exist_ok=True)
         return photo_dir
 
+    def find_photo_dir(self, photo_id: str) -> Optional[Path]:
+        """Finds photo directory across projects on disk without requiring in-memory cache."""
+        try:
+            validate_id(photo_id, "photo_id")
+        except HTTPException:
+            return None
+        default_dir = (self.base_dir / "default_project" / photo_id).resolve()
+        if default_dir.exists() and (default_dir / "original.jpg").exists():
+            return default_dir
+        if not self.base_dir.exists():
+            return None
+        for p_dir in self.base_dir.iterdir():
+            if p_dir.is_dir() and not p_dir.name.startswith("."):
+                candidate = (p_dir / photo_id).resolve()
+                if candidate.exists() and (candidate / "original.jpg").exists():
+                    return candidate
+        return None
+
     def save_uploaded_photo(
         self,
         project_id: str,
@@ -95,6 +113,7 @@ class ProjectStore:
         creates a separate working JPEG if needed, generates a preview-size image,
         and initializes settings.json. Fast operation with zero heavy ML inference.
         """
+        self.get_or_create_project(project_id, studio_id=studio_id)
         photo_dir = self.get_photo_dir(project_id, photo_id)
 
         # 1. Determine original extension and save raw uploaded bytes directly
@@ -684,6 +703,8 @@ class ProjectStore:
             raise HTTPException(status_code=400, detail="Security violation: Path traversal detected")
         meta_file = p_dir / "project.json"
         if not meta_file.exists():
+            if p_dir.exists() and any(p_dir.iterdir()):
+                return self.get_or_create_project(project_id, studio_id=studio_id)
             return None
         meta = self.load_json(meta_file) or {}
         if studio_id and meta.get("owner_studio_id") and meta.get("owner_studio_id") != studio_id:

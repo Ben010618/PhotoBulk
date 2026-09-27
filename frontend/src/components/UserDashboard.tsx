@@ -27,7 +27,7 @@ import { ProjectItem, PhotoItem } from '../types';
 interface UserDashboardProps {
   onNavigate: (page: PageView) => void;
   currentUser: UserSession | null;
-  onOpenTopUp: () => void;
+  onOpenTopUp?: () => void;
 }
 
 export const UserDashboard: React.FC<UserDashboardProps> = ({

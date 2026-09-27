@@ -116,7 +116,7 @@ class JobStatusResponse(BaseModel):
     progress: int = 0
     total: int = 0
     processed: int = 0
-    created_at: float
+    created_at: float = Field(default_factory=time.time)
     updated_at: Optional[float] = None
     message: Optional[str] = None
     error: Optional[str] = None
@@ -187,51 +187,7 @@ AI_CONFIG = {
 }
 
 _GEMINI_VISION_CACHE: Dict[str, Any] = {}
-BATCH_STORE: Dict[str, Dict[str, Any]] = {}
 ACTIVE_JOBS: Dict[str, Dict[str, Any]] = {}
-
-
-def restore_projects_to_batch_store():
-    """Restores persisted photos from on-disk project directories into active BATCH_STORE."""
-    try:
-        if not project_store.base_dir.exists():
-            return
-        restored = 0
-        for p_dir in project_store.base_dir.iterdir():
-            if not p_dir.is_dir():
-                continue
-            project_id = p_dir.name
-            for photo_dir in p_dir.iterdir():
-                if not photo_dir.is_dir():
-                    continue
-                orig_path = photo_dir / "original.jpg"
-                if orig_path.exists():
-                    pid = photo_dir.name
-                    if pid not in BATCH_STORE:
-                        img = cv2.imread(str(orig_path))
-                        if img is not None:
-                            meta = project_store.load_json(photo_dir / "meta.json") or {}
-                            analysis = project_store.load_json(photo_dir / "analysis.json") or {}
-                            face_info = project_store.load_json(photo_dir / "face.json")
-                            BATCH_STORE[pid] = {
-                                "id": pid,
-                                "project_id": project_id,
-                                "studio_id": meta.get("studio_id", "default_studio"),
-                                "filename": meta.get("filename", f"{pid}.jpg"),
-                                "img_bgr": img,
-                                "enhanced_bgr": img,
-                                "face_info": face_info,
-                                "analysis": analysis,
-                                "status": meta.get("status", "ready")
-                            }
-                            restored += 1
-        if restored > 0:
-            logger.info(f"[api_server] Restored {restored} persistent photos from on-disk project store.")
-    except Exception as e:
-        logger.warning(f"[api_server] Notice restoring projects: {e}")
-
-
-restore_projects_to_batch_store()
 
 # Upload constraints
 MAX_UPLOAD_SIZE = int(os.environ.get("MAX_UPLOAD_SIZE_MB", 25)) * 1024 * 1024  # 25 MB
@@ -807,18 +763,10 @@ async def register_photo_endpoint(
         photo_id = f"batch-{int(time.time()*1000)}-{uuid.uuid4().hex[:6]}"
         analysis = analyze_portrait(img_bgr)
 
-        # 4. Stage into BATCH_STORE
-        BATCH_STORE[photo_id] = {
-            "id": photo_id,
-            "studio_id": studio_id,
-            "filename": req.filename,
-            "file_key": req.file_key,
-            "img_bgr": img_bgr,
-            "enhanced_bgr": img_bgr,
-            "face_info": None,
-            "analysis": analysis,
-            "status": "ready"
-        }
+        # 4. Save to on-disk project store
+        project_store.save_uploaded_photo(
+            "default_project", photo_id, req.filename, img_bgr=img_bgr, raw_bytes=contents, studio_id=studio_id
+        )
 
         item_data = {
             "id": photo_id,
@@ -873,61 +821,61 @@ def get_photo_preview(
     if preset_id is not None: custom["preset_id"] = preset_id
     if backdrop_type is not None: custom["backdrop_type"] = backdrop_type
 
-    photo_dir = project_store.get_photo_dir("default_project", photo_id)
-    if photo_dir.exists() and (photo_dir / "original.jpg").exists():
-        if custom:
-            preview_bgr, _ = project_store.render_preview_fast("default_project", photo_id, custom_settings=custom)
-            _, buf = cv2.imencode(".jpg", preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-            return Response(content=buf.tobytes(), media_type="image/jpeg")
-        elif (photo_dir / "preview.jpg").exists():
-            return FileResponse(str(photo_dir / "preview.jpg"), media_type="image/jpeg")
-
-    item = BATCH_STORE.get(photo_id)
-    if not item:
+    photo_dir = project_store.find_photo_dir(photo_id)
+    if not photo_dir or not (photo_dir / "original.jpg").exists():
         raise HTTPException(status_code=404, detail="Photo not found")
-    
-    img = item.get("enhanced_bgr", item["img_bgr"])
-    h, w = img.shape[:2]
-    scale = 1600.0 / max(h, w)
-    thumb = cv2.resize(img, (int(w * scale), int(h * scale))) if scale < 1.0 else img
-    _, buf = cv2.imencode(".jpg", thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+    project_id = photo_dir.parent.name
+    if custom:
+        preview_bgr, _ = project_store.render_preview_fast(project_id, photo_id, custom_settings=custom)
+        _, buf = cv2.imencode(".jpg", preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        return Response(content=buf.tobytes(), media_type="image/jpeg")
+    elif (photo_dir / "preview.jpg").exists():
+        return FileResponse(str(photo_dir / "preview.jpg"), media_type="image/jpeg")
+    else:
+        return FileResponse(str(photo_dir / "original.jpg"), media_type="image/jpeg")
 
 
 @app.post("/api/photos/{photo_id}/preview")
 def post_photo_preview_tune(photo_id: str, settings: Dict[str, Any]):
     """Reruns cheap beauty and lighting steps on ~1600px preview image with sub-second response."""
-    photo_dir = project_store.get_photo_dir("default_project", photo_id)
-    if photo_dir.exists() and (photo_dir / "original.jpg").exists():
-        preview_bgr, lat = project_store.render_preview_fast("default_project", photo_id, custom_settings=settings)
-        _, buf = cv2.imencode(".jpg", preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-        return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"X-Render-Latency-Ms": str(lat)})
-
-    item = BATCH_STORE.get(photo_id)
-    if not item:
+    photo_dir = project_store.find_photo_dir(photo_id)
+    if not photo_dir or not (photo_dir / "original.jpg").exists():
         raise HTTPException(status_code=404, detail="Photo not found")
-    img = item.get("enhanced_bgr", item["img_bgr"])
-    _, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-    return Response(content=buf.tobytes(), media_type="image/jpeg")
+    project_id = photo_dir.parent.name
+    preview_bgr, lat = project_store.render_preview_fast(project_id, photo_id, custom_settings=settings)
+    _, buf = cv2.imencode(".jpg", preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"X-Render-Latency-Ms": str(lat)})
 
 
 @app.get("/api/photos/{photo_id}/master")
 def get_photo_master(photo_id: str):
     """Returns high-resolution enhanced master."""
-    item = BATCH_STORE.get(photo_id)
-    if not item:
+    photo_dir = project_store.find_photo_dir(photo_id)
+    if not photo_dir:
         raise HTTPException(status_code=404, detail="Photo not found")
-    img = item.get("enhanced_bgr", item["img_bgr"])
-    _, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-    return Response(content=buf.tobytes(), media_type="image/jpeg")
+    master_p = photo_dir / "render_master.jpg"
+    if not master_p.exists():
+        master_p = photo_dir / "master.jpg"
+    if not master_p.exists():
+        master_p = photo_dir / "original.jpg"
+    if not master_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    return FileResponse(str(master_p), media_type="image/jpeg")
 
 
 @app.get("/api/photos/{photo_id}/crop-8r")
 def get_photo_crop_8r(photo_id: str):
-    item = BATCH_STORE.get(photo_id)
-    if not item:
+    photo_dir = project_store.find_photo_dir(photo_id)
+    if not photo_dir:
         raise HTTPException(status_code=404, detail="Photo not found")
-    img = item.get("enhanced_bgr", item["img_bgr"])
+    crop8r_p = photo_dir / "render_8R.jpg"
+    if crop8r_p.exists():
+        return FileResponse(str(crop8r_p), media_type="image/jpeg")
+    orig_p = photo_dir / "original.jpg"
+    if not orig_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    img = cv2.imread(str(orig_p))
     crop = crop_8r_aspect(img)
     _, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
     return Response(content=buf.tobytes(), media_type="image/jpeg")
@@ -935,11 +883,17 @@ def get_photo_crop_8r(photo_id: str):
 
 @app.get("/api/photos/{photo_id}/crop-2x2")
 def get_photo_crop_2x2(photo_id: str):
-    item = BATCH_STORE.get(photo_id)
-    if not item:
+    photo_dir = project_store.find_photo_dir(photo_id)
+    if not photo_dir:
         raise HTTPException(status_code=404, detail="Photo not found")
-    img = item.get("enhanced_bgr", item["img_bgr"])
-    face_info = item.get("face_info")
+    crop2x2_p = photo_dir / "render_2x2.jpg"
+    if crop2x2_p.exists():
+        return FileResponse(str(crop2x2_p), media_type="image/jpeg")
+    orig_p = photo_dir / "original.jpg"
+    if not orig_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    img = cv2.imread(str(orig_p))
+    face_info = project_store.load_json(photo_dir / "face.json")
     crop = crop_2x2_id(img, face_info)
     _, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
     return Response(content=buf.tobytes(), media_type="image/jpeg")
@@ -947,10 +901,15 @@ def get_photo_crop_2x2(photo_id: str):
 
 @app.get("/api/photos/{photo_id}/proof")
 def get_photo_proof(photo_id: str, student_name: str = Query("Juan Dela Cruz")):
-    item = BATCH_STORE.get(photo_id)
-    if not item:
+    photo_dir = project_store.find_photo_dir(photo_id)
+    if not photo_dir:
         raise HTTPException(status_code=404, detail="Photo not found")
-    img = item.get("enhanced_bgr", item["img_bgr"])
+    master_p = photo_dir / "render_master.jpg"
+    if not master_p.exists():
+        master_p = photo_dir / "original.jpg"
+    if not master_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+    img = cv2.imread(str(master_p))
     proof = generate_watermarked_proof(img, student_name=student_name, student_id=photo_id)
     _, buf = cv2.imencode(".jpg", proof, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     return Response(content=buf.tobytes(), media_type="image/jpeg")
@@ -970,136 +929,7 @@ def verify_student_proof(student_id: str):
     }
 
 
-# =========================================================================
-# PROCESSING PIPELINE: Single Image & Batch
-# =========================================================================
 
-@app.post("/api/process-image")
-def process_single_image(
-    file: UploadFile = File(None),
-    photo_id: str = Form(None),
-    bg_replacement_enabled: bool = Form(True),
-    backdrop_type: str = Form("royal_navy"),
-    beauty_preset: str = Form("morena_radiant"),
-    regalia_profile: str = Form("standard_toga"),
-    skin_smoothing: float = Form(0.65),
-    blemish_cut: float = Form(0.70),
-    dark_spot_whitening: float = Form(0.50),
-    shine_reduction: float = Form(0.35),
-    lip_color: str = Form("#d87093"),
-    lip_intensity: float = Form(0.35),
-    glow_intensity: float = Form(0.40),
-    eye_catchlight: float = Form(0.45),
-    teeth_whitening: float = Form(0.45),
-    lighting_temp: str = Form("neutral_5500k"),
-    studio_light_intensity: float = Form(0.20),
-    rim_light_boost: float = Form(0.20),
-    iron_strength: float = Form(0.70),
-    engine: str = Form("local_hybrid"),
-    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
-):
-    studio_id = current_user.get("studio_id") if current_user else None
-    studio = get_studio_state(studio_id)
-
-    # 1. Enforce Credit Requirement: Atomically deduct 1 credit per processed photo
-    if PAYMENTS_ENABLED and not deduct_studio_credit(studio["id"], count=1):
-        raise HTTPException(
-            status_code=402,
-            detail="Insufficient studio credits. Processing blocked. Please top up credits to continue."
-        )
-
-    if photo_id and photo_id in BATCH_STORE:
-        img_bgr = BATCH_STORE[photo_id]["img_bgr"]
-        filename = BATCH_STORE[photo_id]["filename"]
-    elif file:
-        contents = file.file.read()
-        img_bgr = validate_image_upload(contents, file.filename, file.content_type)
-        filename = file.filename
-    elif BATCH_STORE:
-        first_key = list(BATCH_STORE.keys())[0]
-        img_bgr = BATCH_STORE[first_key]["img_bgr"]
-        filename = BATCH_STORE[first_key]["filename"]
-        photo_id = first_key
-    else:
-        # Generate synthetic fallback if no sample file on disk
-        img_bgr = np.zeros((800, 600, 3), dtype=np.uint8)
-        img_bgr[:] = (40, 35, 30)
-        cv2.circle(img_bgr, (300, 320), 140, (150, 180, 210), -1)
-        filename = "Synthetic_Sample_Portrait.jpg"
-
-    params = ProcessingParams(
-        bg_replacement_enabled=bg_replacement_enabled,
-        backdrop_type=backdrop_type,
-        beauty_preset=beauty_preset,
-        regalia_profile=regalia_profile,
-        skin_smoothing=skin_smoothing,
-        blemish_cut=blemish_cut,
-        dark_spot_whitening=dark_spot_whitening,
-        shine_reduction=shine_reduction,
-        lip_color=lip_color,
-        lip_intensity=lip_intensity,
-        glow_intensity=glow_intensity,
-        eye_catchlight=eye_catchlight,
-        teeth_whitening=teeth_whitening,
-        lighting_temp=lighting_temp,
-        studio_light_intensity=studio_light_intensity,
-        rim_light_boost=rim_light_boost,
-        iron_strength=iron_strength
-    )
-
-    # Process through standardized ML pipeline
-    pipe_res = process_image(img_bgr, parameters=params)
-    if not pipe_res.success:
-        raise HTTPException(status_code=500, detail=pipe_res.error or "Pipeline processing failed")
-
-    enhanced_bgr = pipe_res.enhanced_bgr
-    crop_8r = pipe_res.crop_8r_bgr
-    crop_2x2 = pipe_res.crop_2x2_bgr
-    face_info = pipe_res.face_info
-    latency_ms = pipe_res.latency_ms
-    engine_label = pipe_res.engine_used
-    analysis = pipe_res.analysis
-
-    if not photo_id:
-        photo_id = f"photo-{int(time.time()*1000)}"
-
-    BATCH_STORE[photo_id] = {
-        "id": photo_id,
-        "studio_id": studio["id"],
-        "filename": filename,
-        "img_bgr": img_bgr,
-        "enhanced_bgr": enhanced_bgr,
-        "face_info": face_info,
-        "analysis": analysis,
-        "status": "done"
-    }
-
-    # Retrieve updated credit balance
-    updated_studio = get_studio_state(studio["id"])
-
-    return {
-        "photo_id": photo_id,
-        "filename": filename,
-        "latency_ms": latency_ms,
-        "engine_used": engine_label,
-        "ai_status": AI_CONFIG.get("status", "local_fallback"),
-        "preview_url": f"/api/photos/{photo_id}/preview",
-        "master_url": f"/api/photos/{photo_id}/master",
-        "crop_8r_url": f"/api/photos/{photo_id}/crop-8r",
-        "crop_2x2_url": f"/api/photos/{photo_id}/crop-2x2",
-        "proof_url": f"/api/photos/{photo_id}/proof",
-        # Retain Data URIs for client immediate preview without roundtrip
-        "original_data_uri": image_to_base64_data_uri(img_bgr),
-        "enhanced_data_uri": image_to_base64_data_uri(enhanced_bgr),
-        "crop_8r_data_uri": image_to_base64_data_uri(crop_8r),
-        "crop_2x2_data_uri": image_to_base64_data_uri(crop_2x2),
-        "bg_replacement_enabled": bg_replacement_enabled,
-        "backdrop_type": backdrop_type,
-        "beauty_preset": beauty_preset,
-        "regalia_profile": regalia_profile,
-        "analysis": analysis,
-        "studio_credits": updated_studio["credit_balance"]
-    }
 
 
 @app.post("/api/batch-upload")
@@ -1143,11 +973,15 @@ async def batch_upload_endpoint(
             "analysis": {},
             "status": "staged"
         })
+        del contents
+        del img_bgr
+        await f.close()
 
     # Start non-blocking background analysis job using worker pool
     job_id = None
     if new_photo_ids:
         job_id = f"job_analysis_{target_project}_{int(time.time()*1000)}"
+        record_job_db(job_id=job_id, studio_id=studio_id, status="processing", total=len(new_photo_ids))
         ACTIVE_JOBS[job_id] = {
             "job_id": job_id,
             "project_id": target_project,
@@ -1157,15 +991,18 @@ async def batch_upload_endpoint(
             "processed": 0,
             "message": "Analyzing facial geometry and subject masks...",
             "result": None,
-            "error": None
+            "error": None,
+            "created_at": time.time()
         }
 
         def _bg_analysis_worker():
             def _prog(processed, total, res):
+                pct = int((processed / max(total, 1)) * 100)
                 if job_id in ACTIVE_JOBS:
                     ACTIVE_JOBS[job_id]["processed"] = processed
-                    ACTIVE_JOBS[job_id]["progress"] = int((processed / max(total, 1)) * 100)
+                    ACTIVE_JOBS[job_id]["progress"] = pct
                     ACTIVE_JOBS[job_id]["message"] = f"Analyzed {processed}/{total} portraits"
+                update_job_db(job_id=job_id, status="processing", progress=pct, processed=processed)
 
             try:
                 run_bulk_project_processing(
@@ -1177,11 +1014,13 @@ async def batch_upload_endpoint(
                     ACTIVE_JOBS[job_id]["status"] = "completed"
                     ACTIVE_JOBS[job_id]["progress"] = 100
                     ACTIVE_JOBS[job_id]["message"] = "Analysis complete"
+                update_job_db(job_id=job_id, status="completed", progress=100, processed=len(new_photo_ids))
             except Exception as e:
                 logger.error(f"Background analysis error for project {target_project}: {e}")
                 if job_id in ACTIVE_JOBS:
                     ACTIVE_JOBS[job_id]["status"] = "failed"
                     ACTIVE_JOBS[job_id]["error"] = str(e)
+                update_job_db(job_id=job_id, status="failed", progress=0, processed=0, error=str(e))
 
         background_tasks.add_task(_bg_analysis_worker)
 
@@ -1196,276 +1035,7 @@ async def batch_upload_endpoint(
 # ASYNCHRONOUS BACKGROUND JOBS & BATCH WORKER
 # =========================================================================
 
-def _run_batch_job_worker(
-    job_id: str,
-    target_ids: List[str],
-    params: ProcessingParams,
-    studio_id: str
-):
-    """
-    Asynchronous non-blocking background batch worker.
-    Processes photos via standardized process_image pipeline, updates live progress,
-    and records results with Zero Silent Failures.
-    """
-    start_all = time.time()
-    total = len(target_ids)
-    processed_items = []
 
-    ACTIVE_JOBS[job_id]["status"] = "processing"
-    ACTIVE_JOBS[job_id]["updated_at"] = time.time()
-    update_job_db(job_id, "processing", 0, 0)
-
-    try:
-        for idx, pid in enumerate(target_ids, 1):
-            item = BATCH_STORE.get(pid)
-            if not item:
-                continue
-
-            try:
-                # Deduct 1 credit per photo; block immediately if zero balance (when payments enabled)
-                if PAYMENTS_ENABLED and not deduct_studio_credit(studio_id, count=1):
-                    item["status"] = "failed"
-                    item["error"] = "Insufficient studio credits. Processing blocked."
-                    processed_items.append({
-                        "id": item["id"],
-                        "name": item.get("filename", pid),
-                        "status": "failed",
-                        "error": "Insufficient studio credits. Processing blocked."
-                    })
-                    continue
-
-                img_bgr = item["img_bgr"]
-
-                pipe_res = process_image(img_bgr, parameters=params)
-                if pipe_res.success:
-                    enhanced_bgr = pipe_res.enhanced_bgr
-                    face_info = pipe_res.face_info
-                    item["enhanced_bgr"] = enhanced_bgr
-                    item["face_info"] = face_info
-                    item["analysis"] = pipe_res.analysis
-                    item["status"] = "done"
-
-                    crop_8r = pipe_res.crop_8r_bgr
-                    crop_2x2 = pipe_res.crop_2x2_bgr
-
-                    processed_items.append({
-                        "id": item["id"],
-                        "name": item["filename"],
-                        "previewUrl": f"/api/photos/{item['id']}/preview",
-                        "masterUrl": f"/api/photos/{item['id']}/master",
-                        "originalUrl": image_to_base64_data_uri(img_bgr, quality=75),
-                        "enhancedUrl": f"/api/photos/{item['id']}/master",
-                        "crop8rUrl": f"/api/photos/{item['id']}/crop-8r",
-                        "crop2x2Url": f"/api/photos/{item['id']}/crop-2x2",
-                        "latency_ms": pipe_res.latency_ms,
-                        "status": "done"
-                    })
-                else:
-                    item["status"] = "failed"
-                    item["error"] = pipe_res.error
-                    processed_items.append({
-                        "id": item["id"],
-                        "name": item["filename"],
-                        "status": "failed",
-                        "error": pipe_res.error
-                    })
-            except Exception as item_err:
-                logger.error(f"[batch_worker] Error processing photo {pid}: {item_err}\n{traceback.format_exc()}")
-                item["status"] = "failed"
-                item["error"] = str(item_err)
-                processed_items.append({
-                    "id": item["id"],
-                    "name": item.get("filename", pid),
-                    "status": "failed",
-                    "error": str(item_err)
-                })
-
-            pct = int((idx / max(1, total)) * 100)
-            ACTIVE_JOBS[job_id]["processed"] = idx
-            ACTIVE_JOBS[job_id]["progress"] = pct
-            ACTIVE_JOBS[job_id]["updated_at"] = time.time()
-            update_job_db(job_id, "processing", pct, idx)
-
-        total_time_ms = max(1, int((time.time() - start_all) * 1000))
-        avg_latency = total_time_ms // max(1, len(processed_items))
-        updated_studio = get_studio_state(studio_id)
-
-        ACTIVE_JOBS[job_id]["status"] = "completed"
-        ACTIVE_JOBS[job_id]["progress"] = 100
-        ACTIVE_JOBS[job_id]["total_time_ms"] = total_time_ms
-        ACTIVE_JOBS[job_id]["per_photo_latency_ms"] = avg_latency
-        ACTIVE_JOBS[job_id]["engine_used"] = detect_actual_engine()
-        ACTIVE_JOBS[job_id]["studio_credits"] = updated_studio["credit_balance"]
-        ACTIVE_JOBS[job_id]["items"] = processed_items
-        ACTIVE_JOBS[job_id]["updated_at"] = time.time()
-        ACTIVE_JOBS[job_id]["message"] = f"Successfully processed {len(processed_items)} photos in {total_time_ms}ms"
-
-        update_job_db(
-            job_id=job_id,
-            status="completed",
-            progress=100,
-            processed=len(processed_items),
-            result_json=json.dumps({"count": len(processed_items), "latency_ms": total_time_ms})
-        )
-        logger.info(f"[batch_worker] Job {job_id} completed successfully ({len(processed_items)} photos).")
-
-    except Exception as e:
-        logger.error(f"[batch_worker] Catastrophic failure in batch worker for {job_id}: {e}\n{traceback.format_exc()}")
-        ACTIVE_JOBS[job_id]["status"] = "failed"
-        ACTIVE_JOBS[job_id]["error"] = str(e)
-        ACTIVE_JOBS[job_id]["updated_at"] = time.time()
-        update_job_db(job_id, "failed", ACTIVE_JOBS[job_id].get("progress", 0), ACTIVE_JOBS[job_id].get("processed", 0), error=str(e))
-
-
-@app.post("/api/batch-process")
-def batch_process_endpoint(
-    background_tasks: BackgroundTasks,
-    bg_replacement_enabled: bool = Form(True),
-    backdrop_type: str = Form("royal_navy"),
-    beauty_preset: str = Form("morena_radiant"),
-    regalia_profile: str = Form("standard_toga"),
-    skin_smoothing: float = Form(0.65),
-    blemish_cut: float = Form(0.70),
-    dark_spot_whitening: float = Form(0.50),
-    shine_reduction: float = Form(0.35),
-    lip_color: str = Form("#d87093"),
-    lip_intensity: float = Form(0.35),
-    glow_intensity: float = Form(0.40),
-    eye_catchlight: float = Form(0.45),
-    teeth_whitening: float = Form(0.45),
-    lighting_temp: str = Form("neutral_5500k"),
-    studio_light_intensity: float = Form(0.20),
-    rim_light_boost: float = Form(0.20),
-    iron_strength: float = Form(0.70),
-    engine: str = Form("local_hybrid"),
-    sync: bool = Query(False),
-    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
-):
-    """
-    Non-blocking batch processing endpoint.
-    Returns HTTP 202 Accepted with a job_id for background processing,
-    or executes synchronously if ?sync=true is specified.
-    """
-    studio_id = current_user.get("studio_id") if current_user else "default_studio"
-    studio = get_studio_state(studio_id)
-
-    # Filter photos for current studio
-    target_items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
-    needed_credits = len(target_items)
-
-    if PAYMENTS_ENABLED and needed_credits > 0 and studio["credit_balance"] < needed_credits:
-        raise HTTPException(
-            status_code=402,
-            detail=f"Insufficient studio credits. Batch requires {needed_credits} credits, but current balance is {studio['credit_balance']}."
-        )
-
-    params = ProcessingParams(
-        bg_replacement_enabled=bg_replacement_enabled,
-        backdrop_type=backdrop_type,
-        beauty_preset=beauty_preset,
-        regalia_profile=regalia_profile,
-        skin_smoothing=skin_smoothing,
-        blemish_cut=blemish_cut,
-        dark_spot_whitening=dark_spot_whitening,
-        shine_reduction=shine_reduction,
-        lip_color=lip_color,
-        lip_intensity=lip_intensity,
-        glow_intensity=glow_intensity,
-        eye_catchlight=eye_catchlight,
-        teeth_whitening=teeth_whitening,
-        lighting_temp=lighting_temp,
-        studio_light_intensity=studio_light_intensity,
-        rim_light_boost=rim_light_boost,
-        iron_strength=iron_strength
-    )
-
-    # If client requested synchronous execution (for legacy/simple scripts):
-    if sync:
-        start_all = time.time()
-        processed_items = []
-        for item in target_items:
-            if not deduct_studio_credit(studio["id"], count=1):
-                break
-            pipe_res = process_image(item["img_bgr"], parameters=params)
-            if pipe_res.success:
-                item["enhanced_bgr"] = pipe_res.enhanced_bgr
-                item["face_info"] = pipe_res.face_info
-                item["status"] = "done"
-                processed_items.append({
-                    "id": item["id"],
-                    "name": item["filename"],
-                    "previewUrl": f"/api/photos/{item['id']}/preview",
-                    "masterUrl": f"/api/photos/{item['id']}/master",
-                    "originalUrl": image_to_base64_data_uri(item["img_bgr"], quality=75),
-                    "enhancedUrl": f"/api/photos/{item['id']}/master",
-                    "crop8rUrl": f"/api/photos/{item['id']}/crop-8r",
-                    "crop2x2Url": f"/api/photos/{item['id']}/crop-2x2",
-                    "latency_ms": pipe_res.latency_ms,
-                    "status": "done"
-                })
-
-        total_time_ms = max(1, int((time.time() - start_all) * 1000))
-        avg_latency = total_time_ms // max(1, len(processed_items))
-        updated_studio = get_studio_state(studio["id"])
-        return {
-            "processed_count": len(processed_items),
-            "total_time_ms": total_time_ms,
-            "per_photo_latency_ms": avg_latency,
-            "engine_used": detect_actual_engine(),
-            "studio_credits": updated_studio["credit_balance"],
-            "items": processed_items
-        }
-
-    # Non-blocking compute: return HTTP 202 Accepted with job_id
-    job_id = f"job-{uuid.uuid4().hex[:12]}"
-    now = time.time()
-    ACTIVE_JOBS[job_id] = {
-        "job_id": job_id,
-        "status": "queued",
-        "progress": 0,
-        "total": len(target_items),
-        "processed": 0,
-        "created_at": now,
-        "updated_at": now,
-        "message": "Batch processing accepted. Offloaded to asynchronous worker.",
-        "items": []
-    }
-    record_job_db(job_id, studio["id"], "queued", len(target_items))
-
-    target_ids = [item["id"] for item in target_items]
-    background_tasks.add_task(_run_batch_job_worker, job_id, target_ids, params, studio["id"])
-
-    return JSONResponse(status_code=202, content=ACTIVE_JOBS[job_id])
-
-
-@app.post("/api/jobs/batch-process", status_code=202)
-def start_background_batch_job(
-    background_tasks: BackgroundTasks,
-    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
-):
-    """Direct convenience endpoint for spawning background batch processing."""
-    studio_id = current_user.get("studio_id") if current_user else "default_studio"
-    target_items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
-
-    job_id = f"job-{uuid.uuid4().hex[:12]}"
-    now = time.time()
-    ACTIVE_JOBS[job_id] = {
-        "job_id": job_id,
-        "status": "queued",
-        "progress": 0,
-        "total": len(target_items),
-        "processed": 0,
-        "created_at": now,
-        "updated_at": now,
-        "message": "Batch processing accepted.",
-        "items": []
-    }
-    record_job_db(job_id, studio_id, "queued", len(target_items))
-
-    params = ProcessingParams()
-    target_ids = [item["id"] for item in target_items]
-    background_tasks.add_task(_run_batch_job_worker, job_id, target_ids, params, studio_id)
-    return JSONResponse(status_code=202, content=ACTIVE_JOBS[job_id])
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
@@ -1550,15 +1120,17 @@ class BulkExportRequest(BaseModel):
     studio_name: Optional[str] = None
     include_contact_sheet: bool = True
 
-def check_project_ownership(project_id: str, current_user: Dict[str, Any]) -> Dict[str, Any]:
+def check_project_ownership(project_id: str, current_user: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Validates project_id, ensures no traversal, and asserts logged-in studio ownership."""
     validate_id(project_id, "project_id")
-    studio_id = current_user.get("studio_id", "default_studio")
+    studio_id = current_user.get("studio_id", "default_studio") if current_user else "default_studio"
     project = project_store.get_project(project_id, studio_id=studio_id)
     if not project:
         existing = project_store.get_project(project_id)
         if existing:
-            raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this studio project.")
+            if current_user and current_user.get("studio_id") and current_user.get("studio_id") != existing.get("studio_id"):
+                raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this studio project.")
+            return existing
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found.")
     return project
 
@@ -1601,7 +1173,7 @@ def list_project_photos(
 def get_project_photo_preview(
     project_id: str,
     photo_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     check_project_ownership(project_id, current_user)
     validate_id(photo_id, "photo_id")
@@ -1617,7 +1189,7 @@ def get_project_photo_preview(
 def get_project_photo_original(
     project_id: str,
     photo_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     check_project_ownership(project_id, current_user)
     validate_id(photo_id, "photo_id")
@@ -1630,12 +1202,14 @@ def get_project_photo_original(
 def get_project_photo_master(
     project_id: str,
     photo_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     check_project_ownership(project_id, current_user)
     validate_id(photo_id, "photo_id")
     photo_dir = project_store.get_photo_dir(project_id, photo_id)
-    master_p = photo_dir / "master.jpg"
+    master_p = photo_dir / "render_master.jpg"
+    if not master_p.exists():
+        master_p = photo_dir / "master.jpg"
     if not master_p.exists():
         master_p = photo_dir / "original.jpg"
     if not master_p.exists():
@@ -1809,26 +1383,29 @@ def download_export_zip(
 @app.get("/api/export-pdf-contact-sheet")
 def export_pdf_contact_sheet(
     school_name: str = "Graduation_Cohort_2026",
+    project_id: str = Query("default_project"),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
-    """Generates multi-up A4 studio proofing contact sheet PDF using an isolated temp folder."""
+    """Generates multi-up A4 studio proofing contact sheet PDF reading on-demand from disk."""
     clean_school = sanitize_filename_or_folder(school_name)
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
     studio = get_studio_state(studio_id)
 
-    items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
+    photos = project_store.list_photos(project_id)
 
     with tempfile.TemporaryDirectory(prefix=f"kameraph_contact_{uuid.uuid4().hex[:8]}_") as temp_dir:
         photos_data = []
-        for idx, item in enumerate(items):
-            img_enh = item.get("enhanced_bgr", item["img_bgr"])
-            p_path = os.path.join(temp_dir, f"thumb_{idx}.jpg")
-            cv2.imwrite(p_path, img_enh)
-            photos_data.append({
-                "name": item.get("filename", f"Portrait_{idx+1}"),
-                "image_path": p_path,
-                "analysis": item.get("analysis", {})
-            })
+        for idx, item in enumerate(photos):
+            photo_dir = project_store.get_photo_dir(project_id, item["id"])
+            p_path = photo_dir / "preview.jpg"
+            if not p_path.exists():
+                p_path = photo_dir / "original.jpg"
+            if p_path.exists():
+                photos_data.append({
+                    "name": item.get("filename", f"Portrait_{idx+1}"),
+                    "image_path": str(p_path),
+                    "analysis": item.get("analysis", {})
+                })
 
         pdf_bytes = generate_contact_sheet_pdf(
             photos_data,
@@ -1846,40 +1423,41 @@ def export_pdf_contact_sheet(
 @app.get("/api/export-pdf-gang-sheet")
 def export_pdf_gang_sheet(
     school_name: str = "Graduation_Cohort_2026",
+    project_id: str = Query("default_project"),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """
     Generates 300 DPI Lab Gang Sheet PDF covering EVERY student in the batch
-    using isolated temporary render folders.
+    using isolated temporary render folders and reading images on demand from disk.
     """
     clean_school = sanitize_filename_or_folder(school_name)
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
     studio = get_studio_state(studio_id)
 
-    items = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
+    photos = project_store.list_photos(project_id)
 
     with tempfile.TemporaryDirectory(prefix=f"kameraph_gang_{uuid.uuid4().hex[:8]}_") as temp_dir:
         students_data = []
-        if items:
-            for idx, item in enumerate(items):
-                img_enh = item.get("enhanced_bgr", item["img_bgr"])
-                student_name = os.path.splitext(item.get("filename", f"Student_{idx+1}"))[0]
-                face_info = item.get("face_info")
+        if photos:
+            for idx, item in enumerate(photos):
+                photo_dir = project_store.get_photo_dir(project_id, item["id"])
+                master_p = photo_dir / "render_master.jpg"
+                if not master_p.exists():
+                    master_p = photo_dir / "original.jpg"
+                r8_p = photo_dir / "render_8R.jpg"
+                if not r8_p.exists():
+                    r8_p = master_p
+                id_p = photo_dir / "render_2x2.jpg"
+                if not id_p.exists():
+                    id_p = master_p
 
-                master_p = os.path.join(temp_dir, f"gang_m_{idx}.jpg")
-                r8_p = os.path.join(temp_dir, f"gang_8r_{idx}.jpg")
-                id_p = os.path.join(temp_dir, f"gang_2x2_{idx}.jpg")
-
-                cv2.imwrite(master_p, img_enh)
-                cv2.imwrite(r8_p, crop_8r_aspect(img_enh))
-                cv2.imwrite(id_p, crop_2x2_id(img_enh, face_info))
-
-                students_data.append({
-                    "student_name": student_name,
-                    "master_image_path": master_p,
-                    "crop_8r_path": r8_p,
-                    "crop_2x2_path": id_p
-                })
+                if master_p.exists():
+                    students_data.append({
+                        "student_name": os.path.splitext(item.get("filename", f"Student_{idx+1}"))[0],
+                        "master_image_path": str(master_p),
+                        "crop_8r_path": str(r8_p),
+                        "crop_2x2_path": str(id_p)
+                    })
         else:
             # Fallback synthetic page
             synth = np.zeros((800, 600, 3), dtype=np.uint8)
@@ -1909,10 +1487,11 @@ def export_pdf_gang_sheet(
 @app.get("/api/export-zip")
 def export_batch_zip(
     school_name: str = "Graduation_Batch_2026",
+    project_id: str = Query("default_project"),
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """
-    Generates a full print package ZIP strictly isolated to the caller's studio:
+    Generates a full print package ZIP strictly reading from on-disk project store:
       - 1_Full_Res_Masters/
       - 2_8R_Yearbook_Frames/
       - 3_2x2_Formal_IDs/
@@ -1922,16 +1501,21 @@ def export_batch_zip(
     studio_id = current_user.get("studio_id") if current_user else "default_studio"
     studio = get_studio_state(studio_id)
 
-    # Multi-tenant isolation: only export current studio's items
-    items_to_export = [p for p in BATCH_STORE.values() if p.get("studio_id", "default_studio") == studio_id]
+    photos = project_store.list_photos(project_id)
 
     zip_buffer = io.BytesIO()
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         manifest_lines = []
-        for idx, item in enumerate(items_to_export, 1):
-            img_enh = item.get("enhanced_bgr", item["img_bgr"])
-            face_info = item.get("face_info")
+        for idx, item in enumerate(photos, 1):
+            photo_dir = project_store.get_photo_dir(project_id, item["id"])
+            master_p = photo_dir / "render_master.jpg"
+            if not master_p.exists():
+                master_p = photo_dir / "original.jpg"
+            if not master_p.exists():
+                continue
+            img_enh = cv2.imread(str(master_p))
+            face_info = project_store.load_json(photo_dir / "face.json")
             base_name = sanitize_filename_or_folder(os.path.splitext(item["filename"])[0])
 
             # 1. Full Resolution Master
@@ -1957,7 +1541,7 @@ def export_batch_zip(
             f"Batch Project  : {clean_school}\n"
             f"Studio Name    : {studio.get('studio_name', 'AuraGrad Creative Studio')}\n"
             f"Generated At   : {time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-            f"Total Photos   : {len(items_to_export)}\n"
+            f"Total Photos   : {len(photos)}\n"
             f"Features Run   :\n"
             f"  [x] Neural Subject Matting & Garment Edge Preservation\n"
             f"  [x] Studio Background Compositing & Clean Edge Feathering\n"

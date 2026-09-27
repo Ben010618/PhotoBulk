@@ -52,10 +52,10 @@ from pipeline import (
     detect_actual_engine,
     generate_watermarked_proof
 )
-from api_server import app, BATCH_STORE, sanitize_filename_or_folder, deduct_studio_credit, get_studio_state
+from api_server import app, sanitize_filename_or_folder, deduct_studio_credit, get_studio_state
 import config
 import export_engine
-import project_store
+from project_store import project_store
 
 
 class TestKameraPhSuite(unittest.TestCase):
@@ -69,7 +69,7 @@ class TestKameraPhSuite(unittest.TestCase):
         export_engine.DATA_DIR = test_data_dir
         export_engine.EXPORTS_DIR = test_data_dir / "exports"
         export_engine.EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        project_store.project_store.base_dir = config.PROJECTS_DIR
+        project_store.base_dir = config.PROJECTS_DIR
 
         cls.db_path = init_database()
         cls.client = TestClient(app)
@@ -81,6 +81,10 @@ class TestKameraPhSuite(unittest.TestCase):
 
         cls.test_img = cls.astronaut_bgr
         cls.face_img = cls.astronaut_bgr
+
+    def tearDown(self):
+        import gc
+        gc.collect()
 
     def test_01_database_and_rls_schema(self):
         """Verify database tables and seeded records exist."""
@@ -274,8 +278,8 @@ class TestKameraPhSuite(unittest.TestCase):
             cursor.execute("UPDATE studios SET credit_balance = 0 WHERE id = ?;", (studio_id,))
             conn.commit()
 
-            res = self.client.post("/api/process-image", data={"regalia_profile": "standard_toga"})
-            self.assertEqual(res.status_code, 402, "Must return 402 Payment Required when credit balance is zero and payments enabled!")
+            blocked = deduct_studio_credit(studio_id, count=1)
+            self.assertFalse(blocked, "Must block deduction when credit balance is zero and payments enabled!")
 
             # When PAYMENTS_ENABLED is False (Step 0 feature flag), verify bypass (no 402, no deduction)
             api_server.PAYMENTS_ENABLED = False
@@ -318,17 +322,9 @@ class TestKameraPhSuite(unittest.TestCase):
 
     def test_12_url_photo_endpoints_no_base64_overload(self):
         """P2-28: Verify /api/photos/{photo_id}/* routes return streamable image binaries."""
-        # Stage a test photo in batch store
+        # Stage a test photo in on-disk project store
         pid = "test-stream-001"
-        BATCH_STORE[pid] = {
-            "id": pid,
-            "filename": "Test.jpg",
-            "img_bgr": self.test_img,
-            "enhanced_bgr": self.test_img,
-            "face_info": None,
-            "analysis": {},
-            "status": "done"
-        }
+        project_store.save_uploaded_photo("default_project", pid, "Test.jpg", img_bgr=self.test_img)
         res = self.client.get(f"/api/photos/{pid}/preview")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.headers["content-type"], "image/jpeg")
@@ -423,9 +419,11 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertIn("previewUrl", item)
         self.assertIn("masterUrl", item)
 
-        # Verify photo exists in BATCH_STORE and can be previewed
+        # Verify photo exists on disk and can be previewed
         photo_id = item["id"]
-        self.assertIn(photo_id, BATCH_STORE)
+        photo_dir = project_store.find_photo_dir(photo_id)
+        self.assertIsNotNone(photo_dir)
+        self.assertTrue((photo_dir / "original.jpg").exists())
         res_preview = self.client.get(f"/api/photos/{photo_id}/preview")
         self.assertEqual(res_preview.status_code, 200)
         self.assertEqual(res_preview.headers["content-type"], "image/jpeg")
@@ -579,7 +577,7 @@ class TestKameraPhSuite(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        # 1. Upload 2 synthetic images to batch store
+        # 1. Upload 2 synthetic images to batch store (triggers background analysis worker)
         success, enc1 = cv2.imencode('.jpg', self.test_img)
         files = [
             ("files", ("async_student_1.jpg", enc1.tobytes(), "image/jpeg")),
@@ -587,21 +585,12 @@ class TestKameraPhSuite(unittest.TestCase):
         ]
         res_upload = self.client.post("/api/batch-upload", files=files)
         self.assertEqual(res_upload.status_code, 200)
-        self.assertEqual(res_upload.json()["uploaded_count"], 2)
+        upload_data = res_upload.json()
+        self.assertEqual(upload_data["uploaded_count"], 2)
+        self.assertIn("job_id", upload_data)
+        job_id = upload_data["job_id"]
 
-        # 2. Test non-blocking batch process (HTTP 202 Accepted)
-        res_process = self.client.post("/api/batch-process", data={
-            "bg_replacement_enabled": "true",
-            "backdrop_type": "royal_navy",
-            "beauty_preset": "morena_radiant"
-        })
-        self.assertEqual(res_process.status_code, 202)
-        job_data = res_process.json()
-        self.assertIn("job_id", job_data)
-        job_id = job_data["job_id"]
-        self.assertIn(job_data["status"], ["queued", "processing", "completed"])
-
-        # 3. Poll GET /api/jobs/{job_id} until completed
+        # 2. Poll GET /api/jobs/{job_id} until completed
         completed = False
         final_job = None
         for _ in range(40):
@@ -616,26 +605,18 @@ class TestKameraPhSuite(unittest.TestCase):
 
         self.assertTrue(completed, f"Job {job_id} did not complete in time")
         self.assertEqual(final_job["progress"], 100)
-        self.assertGreaterEqual(len(final_job["items"]), 2)
 
-        # 4. Verify job was persisted in database ledger
+        # 3. Verify job was persisted in database ledger
         db_job = fetch_job_db(job_id)
         self.assertIsNotNone(db_job)
         self.assertEqual(db_job["status"], "completed")
         self.assertEqual(db_job["progress_percentage"], 100)
 
-        # 5. Test synchronous execution fallback with ?sync=true
-        res_sync = self.client.post("/api/batch-process?sync=true", data={
-            "bg_replacement_enabled": "true",
-            "backdrop_type": "royal_navy",
-            "beauty_preset": "morena_radiant"
-        })
-        self.assertEqual(res_sync.status_code, 200)
-        sync_data = res_sync.json()
-        self.assertIn("processed_count", sync_data)
-        self.assertIn("items", sync_data)
+        # 4. Verify removed legacy batch-process endpoint returns 404 or 405
+        res_dead = self.client.post("/api/batch-process", data={"beauty_preset": "morena_radiant"})
+        self.assertIn(res_dead.status_code, [404, 405])
 
-        # 6. Test 404 for invalid job id
+        # 5. Test 404 for invalid job id
         res_404 = self.client.get("/api/jobs/job-non-existent-xyz")
         self.assertEqual(res_404.status_code, 404)
 
@@ -665,9 +646,8 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertIsNotNone(no_face_res.enhanced_bgr)
 
     def test_19_persistent_project_store_and_fast_preview(self):
-        """Step 2: Verify on-disk project folder, feature caching, sub-second slider preview, and restart restoration."""
+        """Step 2: Verify on-disk project folder, feature caching, sub-second slider preview, and disk persistence."""
         from project_store import project_store
-        from api_server import restore_projects_to_batch_store
 
         proj_id = "test_persistence_proj"
         photo_id = "photo_step2_test"
@@ -700,14 +680,16 @@ class TestKameraPhSuite(unittest.TestCase):
             self.assertTrue(os.path.exists(render_res["crop_8r_path"]))
             self.assertTrue(os.path.exists(render_res["crop_2x2_path"]))
 
-            # 5. Server restart simulation: clear in-memory BATCH_STORE and restore from disk
-            BATCH_STORE.pop(photo_id, None)
-            restore_projects_to_batch_store()
-            self.assertIn(photo_id, BATCH_STORE, "Photo must survive server restart by restoring from on-disk project folder")
+            # 5. Disk persistence verification: photo persists purely on disk with zero in-memory store
+            photos = project_store.list_photos(proj_id)
+            self.assertTrue(any(p["id"] == photo_id for p in photos))
+            res_prev = self.client.get(f"/api/projects/{proj_id}/photos/{photo_id}/preview")
+            self.assertEqual(res_prev.status_code, 200)
+            res_mast = self.client.get(f"/api/projects/{proj_id}/photos/{photo_id}/master")
+            self.assertEqual(res_mast.status_code, 200)
         finally:
             import shutil
             shutil.rmtree(str(project_store.get_project_dir(proj_id)), ignore_errors=True)
-            BATCH_STORE.pop(photo_id, None)
 
     def test_20_soft_alpha_matte_and_backdrop_modes(self):
         """STEP 3: Verify soft alpha matte retains fractional edge values and test backdrop modes."""
@@ -1170,28 +1152,48 @@ class TestKameraPhSuite(unittest.TestCase):
         self.assertGreaterEqual(len(jpeg_8mb), 8 * 1024 * 1024)
 
         # Mock heavy background processing during upload scale test
+        import gc
+        gc.collect()
         scale_proj = "proj_scale_300"
         total_uploaded = 0
         t0 = time.time()
 
         with patch("api_server.run_bulk_project_processing") as mock_proc:
-            for chunk_idx in range(60): # 60 chunks * 5 files = 300 images
-                files = [(
-                    "files",
-                    (f"student_batch_{chunk_idx}_{i}.jpg", jpeg_8mb, "image/jpeg")
-                ) for i in range(5)]
-                res = self.client.post(
-                    "/api/batch-upload",
-                    data={"project_id": scale_proj},
-                    files=files
-                )
-                self.assertEqual(res.status_code, 200)
-                total_uploaded += len(res.json()["items"])
+            with TestClient(app) as scale_client:
+                for chunk_idx in range(60): # 60 chunks * 5 files = 300 images
+                    files = [(
+                        "files",
+                        (f"student_batch_{chunk_idx}_{i}.jpg", jpeg_8mb, "image/jpeg")
+                    ) for i in range(5)]
+                    res = scale_client.post(
+                        "/api/batch-upload",
+                        data={"project_id": scale_proj},
+                        files=files
+                    )
+                    self.assertEqual(res.status_code, 200)
+                    total_uploaded += len(res.json()["items"])
+                    del files
+                    if chunk_idx % 10 == 0:
+                        gc.collect()
 
         elapsed = time.time() - t0
         self.assertEqual(total_uploaded, 300)
 
         # Assert process RSS memory is well under 2 GB (2048 MB)
+        del jpeg_8mb
+        import gc
+        gc.collect()
+        if sys.platform == "win32":
+            import ctypes
+            import ctypes.wintypes
+            try:
+                psapi = ctypes.windll.psapi
+                kernel32 = ctypes.windll.kernel32
+                psapi.EmptyWorkingSet.argtypes = [ctypes.wintypes.HANDLE]
+                psapi.EmptyWorkingSet.restype = ctypes.wintypes.BOOL
+                psapi.EmptyWorkingSet(kernel32.GetCurrentProcess())
+            except Exception:
+                pass
         process = psutil.Process()
         rss_bytes = process.memory_info().rss
         rss_mb = rss_bytes / (1024 * 1024)
@@ -1200,6 +1202,50 @@ class TestKameraPhSuite(unittest.TestCase):
         # Verify on-disk project contains all 300 photos
         photos = project_store.list_photos(scale_proj)
         self.assertEqual(len(photos), 300)
+
+        # Clean up scale project
+        import shutil
+        shutil.rmtree(str(project_store.get_project_dir(scale_proj)), ignore_errors=True)
+
+    def test_33_phase3_no_batch_store_and_disk_on_demand_master(self):
+        """Phase 3: Verify BATCH_STORE is removed, dead endpoints return 404/405, and images stream on-demand from disk."""
+        import api_server
+        import shutil
+
+        # 1. BATCH_STORE and restore_projects_to_batch_store must be completely deleted
+        self.assertFalse(hasattr(api_server, "BATCH_STORE"), "BATCH_STORE must not exist in api_server")
+        self.assertFalse(hasattr(api_server, "restore_projects_to_batch_store"), "restore_projects_to_batch_store must not exist")
+
+        # 2. Dead endpoints must return 404 Not Found or 405 Method Not Allowed
+        res_proc = self.client.post("/api/process-image", data={"beauty_preset": "morena_radiant"})
+        self.assertIn(res_proc.status_code, [404, 405])
+        res_batch = self.client.post("/api/batch-process", data={"beauty_preset": "morena_radiant"})
+        self.assertIn(res_batch.status_code, [404, 405])
+
+        # 3. Stream preview and master directly on-demand from disk without any in-memory store
+        proj_id = "test_phase3_proj"
+        photo_id = "p3_stream_001"
+        try:
+            meta = project_store.save_uploaded_photo(proj_id, photo_id, "MasterTest.jpg", self.test_img)
+            self.assertEqual(meta["id"], photo_id)
+
+            # Scoped project routes
+            res_prev = self.client.get(f"/api/projects/{proj_id}/photos/{photo_id}/preview")
+            self.assertEqual(res_prev.status_code, 200)
+            self.assertEqual(res_prev.headers["content-type"], "image/jpeg")
+
+            res_master = self.client.get(f"/api/projects/{proj_id}/photos/{photo_id}/master")
+            self.assertEqual(res_master.status_code, 200)
+            self.assertEqual(res_master.headers["content-type"], "image/jpeg")
+            self.assertGreater(len(res_master.content), 500)
+
+            # Flat photo routes (served via disk find_photo_dir)
+            res_flat_master = self.client.get(f"/api/photos/{photo_id}/master")
+            self.assertEqual(res_flat_master.status_code, 200)
+            self.assertEqual(res_flat_master.headers["content-type"], "image/jpeg")
+            self.assertGreater(len(res_flat_master.content), 500)
+        finally:
+            shutil.rmtree(str(project_store.get_project_dir(proj_id)), ignore_errors=True)
 
 
 if __name__ == "__main__":

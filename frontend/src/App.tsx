@@ -18,14 +18,12 @@ import { LandingPage } from './components/LandingPage';
 import { AuthPage } from './components/AuthPage';
 import { UserDashboard } from './components/UserDashboard';
 import { AdminPanel } from './components/Admin';
-import { StudentPortal } from './components/Student';
 import { PhotoComparisonViewer } from './components/PhotoComparisonViewer';
 import { SettingsPanel } from './components/SettingsPanel';
 import { BatchFilmstrip } from './components/BatchFilmstrip';
 import { ReviewGrid } from './components/ReviewGrid';
 import { UploadView } from './components/UploadView';
 import { ExportModal } from './components/ExportModal';
-import { TopUpModal } from './components/TopUpModal';
 import { ToastContainer } from './components/Common/ToastContainer';
 
 import { api } from './api/client';
@@ -41,7 +39,7 @@ import {
 
 export default function App() {
   // Global Stores
-  const { currentPage, setCurrentPage, isTopUpModalOpen, openTopUpModal, closeTopUpModal, addToast } = useUIStore();
+  const { currentPage, setCurrentPage, addToast } = useUIStore();
   const { currentUser, setCurrentUser, setCredits, logout } = useAuthStore();
   const {
     currentProjectId,
@@ -436,7 +434,6 @@ export default function App() {
         onNavigate={setCurrentPage}
         currentUser={currentUser}
         onLogout={logout}
-        onOpenTopUp={openTopUpModal}
       />
 
       {/* Main Page Routing */}
@@ -458,16 +455,11 @@ export default function App() {
         <UserDashboard
           onNavigate={setCurrentPage}
           currentUser={currentUser}
-          onOpenTopUp={openTopUpModal}
         />
       )}
 
       {currentPage === 'admin_dashboard' && (
         <AdminPanel onNavigate={setCurrentPage} />
-      )}
-
-      {currentPage === 'student_portal' && (
-        <StudentPortal />
       )}
 
       {currentPage === 'editor' && (
@@ -700,18 +692,6 @@ export default function App() {
         projectTitle={currentProjectTitle}
         totalPhotos={photos.length}
       />
-
-      {/* Top-Up Modal (Only active if PAYMENTS_ENABLED is true) */}
-      {useUIStore.getState().paymentsEnabled && (
-        <TopUpModal
-          isOpen={isTopUpModalOpen}
-          onClose={closeTopUpModal}
-          onSuccess={(addedCredits) => {
-            setCredits(currentUser ? currentUser.credits + addedCredits : addedCredits);
-            addToast('success', `Added ${addedCredits} credits to studio account.`);
-          }}
-        />
-      )}
     </div>
   );
 }
