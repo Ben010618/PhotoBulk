@@ -59,15 +59,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
         <div className="max-w-5xl mx-auto text-center space-y-6">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-[#30363d] bg-[#0d1117] text-xs font-mono text-[#8b949e]">
             <span className="w-2 h-2 rounded-full bg-[#f0f6fc] animate-pulse"></span>
-            <span>Commercial-Safe Permissive AI Architecture</span>
+            <span>Photographer-Centric AI Batch Retouching &amp; Color Grading</span>
           </div>
 
           <h1 className="text-4xl md:text-5xl lg:text-6xl font-extrabold text-[#f0f6fc] tracking-tight leading-tight">
-            High-Volume AI Portrait Studio Suite for the Philippines
+            AI Batch Portrait Retouching &amp; Color Grading Suite
           </h1>
 
           <p className="max-w-3xl mx-auto text-base md:text-lg text-[#8b949e] leading-relaxed">
-            Eliminate weeks of manual Photoshop cutout labor. Automatically detach subjects, apply authentic Philippine graduation studio backdrops, preserve rich Morena skin tones with AI neural frequency separation, and generate lab-ready 8R and 2x2 print packages in seconds.
+            Built for professional photographers and studio production. Upload hundreds of portraits, detach subjects from backgrounds in 1-click, apply Aftershoot-style AI skin beautification, grade with professional 3D LUT profiles, sync looks across your entire gallery, and export 300 DPI lab print packages in seconds.
           </p>
 
           {/* Action CTAs: Studio Editor, Sign In, Sign Up, Dashboard */}
@@ -81,8 +81,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
             </button>
 
             <button
-              onClick={() => onNavigate('auth', 'signin')}
+              onClick={() => onNavigate('user_dashboard')}
               className="px-5 py-3 rounded text-sm font-medium border border-[#30363d] bg-[#161b22] text-[#f0f6fc] hover:bg-[#21262d] hover:border-[#8b949e] transition flex items-center gap-2"
+            >
+              <span>Studio Projects</span>
+            </button>
+
+            <button
+              onClick={() => onNavigate('auth', 'signin')}
+              className="px-5 py-3 rounded text-sm font-medium border border-[#30363d] bg-[#0d1117] text-[#8b949e] hover:text-[#f0f6fc] hover:bg-[#161b22] transition flex items-center gap-2"
             >
               <LogIn className="w-4 h-4 text-[#8b949e]" />
               <span>Studio Login</span>
@@ -90,25 +97,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
 
             <button
               onClick={() => onNavigate('auth', 'signup')}
-              className="px-5 py-3 rounded text-sm font-medium border border-[#30363d] bg-[#161b22] text-[#f0f6fc] hover:bg-[#21262d] hover:border-[#8b949e] transition flex items-center gap-2"
+              className="px-5 py-3 rounded text-sm font-medium border border-[#30363d] bg-[#0d1117] text-[#8b949e] hover:text-[#f0f6fc] hover:bg-[#161b22] transition flex items-center gap-2"
             >
               <UserPlus className="w-4 h-4 text-[#8b949e]" />
               <span>Sign Up New Studio</span>
-            </button>
-
-            <button
-              onClick={() => onNavigate('user_dashboard')}
-              className="px-5 py-3 rounded text-sm font-medium border border-[#30363d] bg-[#0d1117] text-[#8b949e] hover:text-[#f0f6fc] hover:bg-[#161b22] transition flex items-center gap-2"
-            >
-              <span>View Dashboard</span>
-            </button>
-
-            <button
-              onClick={() => onNavigate('student_portal')}
-              className="px-5 py-3 rounded text-sm font-medium border border-[#30363d] bg-[#0d1117] text-[#8b949e] hover:text-[#58a6ff] hover:border-[#58a6ff]/50 hover:bg-[#161b22] transition flex items-center gap-2"
-            >
-              <GraduationCap className="w-4 h-4 text-[#58a6ff]" />
-              <span>Student Proof Portal</span>
             </button>
           </div>
 
@@ -448,7 +440,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onNavigate }) => {
               </li>
             </ul>
             <button
-              onClick={() => onNavigate('auth')}
+              onClick={() => {
+                window.location.href = 'mailto:sales@kameraph.com?subject=Studio%20Enterprise%20Plan%20Inquiry';
+              }}
               className="w-full py-2 rounded text-xs font-medium border border-[#30363d] bg-[#0d1117] hover:bg-[#21262d] text-[#f0f6fc] transition"
             >
               Contact Sales

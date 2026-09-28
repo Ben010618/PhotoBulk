@@ -3,8 +3,19 @@ export type PageView =
   | 'auth'
   | 'user_dashboard'
   | 'admin_dashboard'
-  | 'editor'
-  | 'student_portal';
+  | 'editor';
+
+export interface ColorProfile {
+  id: string;
+  name: string;
+  category: string;
+  badge?: string;
+  description: string;
+  base_warmth?: number;
+  base_contrast?: number;
+  base_vibrance?: number;
+  is_monochrome?: boolean;
+}
 
 export interface UserSession {
   name: string;
@@ -18,6 +29,7 @@ export interface PhotoAnalysis {
   sharpness_score?: number;
   sharpness_grade?: string;
   blink_status?: 'open' | 'blink';
+  eyes_open?: boolean;
   is_best_shot?: boolean;
   star_rating?: number;
   review_needed?: boolean;
@@ -42,6 +54,22 @@ export interface PhotoAnalysis {
     cast_type?: string;
     delta_b?: number;
   };
+  plain_summary?: string;
+  ai_appraisal?: AiAppraisal;
+}
+
+export interface AiAppraisal {
+  active: boolean;
+  provider: string;
+  model_used: string;
+  skin_undertone: string;
+  tone_label?: string;
+  lighting_temperature: string;
+  blemish_score: number;
+  beautify_appraisal: string;
+  recommended_preset: string;
+  recommended_color_profile: string;
+  auto_corrections?: Record<string, any>;
 }
 
 export interface PhotoItem {
@@ -120,6 +148,8 @@ export interface ExportJobStatus {
     zip_size_bytes: number;
     total_images_rendered: number;
     latency_ms: number;
+    total_files?: number;
+    file_size_bytes?: number;
   };
 }
 
@@ -231,13 +261,22 @@ export interface JobStatusResponse {
 }
 
 export interface AiConfigResponse {
-  gemini_model: string;
-  is_key_configured: boolean;
-  active_engine: string;
+  model: string;
+  has_key: boolean;
+  engine_label: string;
+  provider: string;
+  beautify_mode: string;
+  status: string;
+  api_key_masked?: string;
+  last_tested?: string;
+  // Legacy aliases for backward compatibility
+  gemini_model?: string;
+  is_key_configured?: boolean;
+  active_engine?: string;
 }
 
 export interface AiKeyTestResponse {
-  status: 'success' | 'error';
+  status: 'success' | 'active' | 'error';
   message: string;
   latency_ms?: number;
   detail?: string;

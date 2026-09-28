@@ -25,7 +25,6 @@ import { ReviewGrid } from './components/ReviewGrid';
 import { UploadView } from './components/UploadView';
 import { ExportModal } from './components/ExportModal';
 import { TopUpModal } from './components/TopUpModal';
-import { StudentPortal } from './components/StudentPortal/StudentPortal';
 import { ToastContainer } from './components/Common/ToastContainer';
 
 import { api } from './api/client';
@@ -35,6 +34,7 @@ import { useEditorStore, WorkflowStep } from './store/useEditorStore';
 import {
   BackdropPreset,
   BeautyPreset,
+  ColorProfile,
   PhotoItem,
   RegaliaProfile,
 } from './types';
@@ -96,6 +96,14 @@ export default function App() {
     setRimLightBoost,
     togaIron,
     setTogaIron,
+    colorProfile,
+    setColorProfile,
+    colorWarmth,
+    setColorWarmth,
+    colorContrast,
+    setColorContrast,
+    colorVibrance,
+    setColorVibrance,
     printViewMode,
     setPrintViewMode,
     sliderPosition,
@@ -112,6 +120,7 @@ export default function App() {
     setBatchProgress,
   } = useEditorStore();
 
+  const [colorProfiles, setColorProfiles] = useState<ColorProfile[]>([]);
   const [authInitialMode, setAuthInitialMode] = useState<'signin' | 'signup'>('signin');
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
@@ -119,7 +128,6 @@ export default function App() {
   const [isApplyingToAll, setIsApplyingToAll] = useState<boolean>(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 1. Studio Backdrops (Matching Step 4 & background_engine.py)
   const backdrops: BackdropPreset[] = [
@@ -281,6 +289,18 @@ export default function App() {
       }
     };
     fetchConfig();
+
+    // Fetch Aftershoot-style Color Profiles & LUTs
+    api.fetchColorProfiles()
+      .then((profiles) => {
+        if (isMounted && profiles && profiles.length > 0) {
+          setColorProfiles(profiles);
+        }
+      })
+      .catch((err) => {
+        console.warn('[App] Could not fetch color profiles, using built-in defaults:', err);
+      });
+
     return () => {
       isMounted = false;
     };
@@ -296,6 +316,8 @@ export default function App() {
         originalUrl: `/api/projects/${projId}/photos/${p.id}/original`,
         enhancedUrl: `/api/projects/${projId}/photos/${p.id}/preview`,
         previewUrl: `/api/projects/${projId}/photos/${p.id}/preview`,
+        crop8rUrl: `/api/projects/${projId}/photos/${p.id}/crop-8r`,
+        crop2x2Url: `/api/projects/${projId}/photos/${p.id}/crop-2x2`,
         masterUrl: `/api/projects/${projId}/photos/${p.id}/master`,
         status: p.status || 'ready',
         analysis: p.analysis,
@@ -337,6 +359,7 @@ export default function App() {
         bg_replacement_enabled: bgReplacementEnabled,
         backdrop_type: backdropType,
         regalia_profile: regaliaProfile,
+        preset_id: beautyPreset,
         beauty_preset: beautyPreset,
         skin_smoothing: skinSmoothing / 100,
         blemish_cut: blemishRemoval / 100,
@@ -354,6 +377,10 @@ export default function App() {
         studio_light_intensity: studioLightIntensity / 100,
         rim_light_boost: rimLightBoost / 100,
         iron_strength: togaIron / 100,
+        color_profile: colorProfile,
+        color_warmth: colorWarmth,
+        color_contrast: colorContrast,
+        color_vibrance: colorVibrance,
       };
 
       const res = await api.updatePhotoSettings(
@@ -364,7 +391,10 @@ export default function App() {
       );
 
       // Force image cache bust with timestamp
-      const cacheBustUrl = `/api/projects/${currentProjectId}/photos/${activePhoto.id}/preview?t=${Date.now()}`;
+      const now = Date.now();
+      const cacheBustUrl = `/api/projects/${currentProjectId}/photos/${activePhoto.id}/preview?t=${now}`;
+      const cacheBust8r = `/api/projects/${currentProjectId}/photos/${activePhoto.id}/crop-8r?t=${now}`;
+      const cacheBust2x2 = `/api/projects/${currentProjectId}/photos/${activePhoto.id}/crop-2x2?t=${now}`;
 
       setPhotos((prev) =>
         prev.map((p) =>
@@ -373,6 +403,8 @@ export default function App() {
                 ...p,
                 enhancedUrl: cacheBustUrl,
                 previewUrl: cacheBustUrl,
+                crop8rUrl: cacheBust8r,
+                crop2x2Url: cacheBust2x2,
                 has_user_override: true,
                 status: 'done',
               }
@@ -390,6 +422,61 @@ export default function App() {
     }
   };
 
+  // AI Auto-Tune and Quality Appraisal
+  const handleAutoEnhanceActive = async () => {
+    if (!activePhoto) return;
+    setIsProcessing(true);
+
+    try {
+      const res = await api.autoEnhancePhoto(currentProjectId, activePhoto.id);
+      const now = Date.now();
+      const cacheBustUrl = `/api/projects/${currentProjectId}/photos/${activePhoto.id}/preview?t=${now}`;
+      const cacheBust8r = `/api/projects/${currentProjectId}/photos/${activePhoto.id}/crop-8r?t=${now}`;
+      const cacheBust2x2 = `/api/projects/${currentProjectId}/photos/${activePhoto.id}/crop-2x2?t=${now}`;
+
+      if (res.appraisal) {
+        if (res.appraisal.recommended_preset) {
+          setBeautyPreset(res.appraisal.recommended_preset);
+        }
+        if (res.appraisal.recommended_color_profile) {
+          setColorProfile(res.appraisal.recommended_color_profile);
+        }
+        if (res.appraisal.lighting_temperature) {
+          setLightingTemp(res.appraisal.lighting_temperature);
+        }
+      }
+
+      setPhotos((prev) =>
+        prev.map((p) =>
+          p.id === activePhoto.id
+            ? {
+                ...p,
+                enhancedUrl: cacheBustUrl,
+                previewUrl: cacheBustUrl,
+                crop8rUrl: cacheBust8r,
+                crop2x2Url: cacheBust2x2,
+                has_user_override: true,
+                status: 'done',
+                analysis: {
+                  ...p.analysis,
+                  ai_appraisal: res.appraisal,
+                },
+              }
+            : p
+        )
+      );
+
+      const providerLabel = res.appraisal?.provider === 'google_gemini' ? 'Google Gemini Vision AI' : 'Local Hybrid AI';
+      addToast('success', `AI Auto-Tuned with ${providerLabel} in ${res.render_latency_ms || 300} ms!`);
+    } catch (err: unknown) {
+      console.error('[App] Auto enhance error:', err);
+      const msg = err instanceof Error ? err.message : 'Error running AI Auto-Tune';
+      addToast('error', msg);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   // 2. Single to Bulk Apply (Step 7)
   const handleBulkApply = async () => {
     if (!activePhoto || photos.length === 0) return;
@@ -400,8 +487,16 @@ export default function App() {
       if (res.job_id && res.status === 'processing') {
         // Background worker pool processing: poll job and refresh thumbnails as completed
         let isDone = false;
+        let pollAttempts = 0;
+        const MAX_POLL_ATTEMPTS = 150; // ~120 seconds at 800ms intervals
         while (!isDone) {
           await new Promise((resolve) => setTimeout(resolve, 800));
+          pollAttempts++;
+          if (pollAttempts > MAX_POLL_ATTEMPTS) {
+            addToast('error', 'Apply-to-all timed out. The job may still be running in the background.');
+            isDone = true;
+            break;
+          }
           try {
             const status = await api.getJobStatus(res.job_id);
             // Refresh thumbnails as they complete
@@ -464,7 +559,10 @@ export default function App() {
       />
 
       {/* Main Page Routing */}
-      {currentPage === 'landing' && <LandingPage onNavigate={setCurrentPage} />}
+      {currentPage === 'landing' && <LandingPage onNavigate={(page, mode) => {
+        if (mode) setAuthInitialMode(mode);
+        setCurrentPage(page);
+      }} />}
 
       {currentPage === 'auth' && (
         <AuthPage
@@ -487,10 +585,6 @@ export default function App() {
 
       {currentPage === 'admin_dashboard' && (
         <AdminPanel onNavigate={setCurrentPage} />
-      )}
-
-      {currentPage === 'student_portal' && (
-        <StudentPortal />
       )}
 
       {currentPage === 'editor' && (
@@ -643,6 +737,7 @@ export default function App() {
                       containerRef={containerRef}
                       isDragging={isDragging}
                       setIsDragging={setIsDragging}
+                      onDownloadActive={handleDownloadActive}
                     />
 
                     <SettingsPanel
@@ -688,11 +783,23 @@ export default function App() {
                       setRimLightBoost={setRimLightBoost}
                       togaIron={togaIron}
                       setTogaIron={setTogaIron}
+                      colorProfiles={colorProfiles}
+                      colorProfile={colorProfile}
+                      setColorProfile={setColorProfile}
+                      colorWarmth={colorWarmth}
+                      setColorWarmth={setColorWarmth}
+                      colorContrast={colorContrast}
+                      setColorContrast={setColorContrast}
+                      colorVibrance={colorVibrance}
+                      setColorVibrance={setColorVibrance}
                       backdrops={backdrops}
                       beautyPresets={beautyPresets}
                       regaliaProfiles={regaliaProfiles}
                       onApplySettings={handleProcessActive}
                       onApplyToAll={handleBulkApply}
+                      onAiAutoTune={handleAutoEnhanceActive}
+                      isAiAutoTuning={isProcessing}
+                      aiAppraisal={activePhoto?.analysis?.ai_appraisal}
                       isProcessing={isProcessing}
                       isApplyingToAll={isApplyingToAll}
                     />

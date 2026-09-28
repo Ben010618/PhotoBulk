@@ -1,6 +1,6 @@
-import React from 'react';
-import { Sliders, Sparkles, Shirt, Sun, Palette, Check, Scissors, Layers, CheckCircle2 } from 'lucide-react';
-import { BackdropPreset, BeautyPreset, RegaliaProfile } from '../types';
+import React, { useState } from 'react';
+import { Sliders, Sparkles, Shirt, Sun, Palette, Check, Scissors, Layers, CheckCircle2, Flame, Wand2 } from 'lucide-react';
+import { BackdropPreset, BeautyPreset, RegaliaProfile, ColorProfile } from '../types';
 
 interface SettingsPanelProps {
   bgReplacementEnabled: boolean;
@@ -11,6 +11,15 @@ interface SettingsPanelProps {
   setRegaliaProfile: (p: string) => void;
   beautyPreset: string;
   setBeautyPreset: (p: string) => void;
+  colorProfiles?: ColorProfile[];
+  colorProfile?: string;
+  setColorProfile?: (p: string) => void;
+  colorWarmth?: number;
+  setColorWarmth?: (v: number) => void;
+  colorContrast?: number;
+  setColorContrast?: (v: number) => void;
+  colorVibrance?: number;
+  setColorVibrance?: (v: number) => void;
   skinSmoothing: number;
   setSkinSmoothing: (v: number) => void;
   blemishRemoval: number;
@@ -50,6 +59,9 @@ interface SettingsPanelProps {
   regaliaProfiles: RegaliaProfile[];
   onApplySettings: () => void;
   onApplyToAll?: () => void;
+  onAiAutoTune?: () => void;
+  isAiAutoTuning?: boolean;
+  aiAppraisal?: any;
   isProcessing: boolean;
   isApplyingToAll?: boolean;
 }
@@ -63,6 +75,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   setRegaliaProfile,
   beautyPreset,
   setBeautyPreset,
+  colorProfiles = [],
+  colorProfile = 'clean_commercial',
+  setColorProfile,
+  colorWarmth = 0,
+  setColorWarmth,
+  colorContrast = 0,
+  setColorContrast,
+  colorVibrance = 0,
+  setColorVibrance,
   skinSmoothing,
   setSkinSmoothing,
   blemishRemoval,
@@ -102,6 +123,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   regaliaProfiles,
   onApplySettings,
   onApplyToAll,
+  onAiAutoTune,
+  isAiAutoTuning = false,
+  aiAppraisal,
   isProcessing,
   isApplyingToAll = false,
 }) => {
@@ -118,22 +142,77 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   };
 
   const handleSelectPreset = (preset: BeautyPreset) => {
+    // Normalize: backend presets use 0.0–1.0 floats, frontend sliders use 0–100 integers.
+    const toPercent = (val: number) => Math.round(val <= 1.0 && val > 0 ? val * 100 : val);
+
     setBeautyPreset(preset.id);
-    setSkinSmoothing(Math.round(preset.skin_smoothing));
-    setBlemishRemoval(Math.round(preset.blemish_cut));
+    setSkinSmoothing(toPercent(preset.skin_smoothing));
+    setBlemishRemoval(toPercent(preset.blemish_cut));
     const sc = preset.spot_correction ?? preset.dark_spot_whitening ?? 35;
-    handleSpotChange(Math.round(sc));
-    setShineCut(Math.round(preset.shine_reduction));
-    setGlowIntensity(Math.round(preset.glow_intensity));
+    handleSpotChange(toPercent(sc));
+    setShineCut(toPercent(preset.shine_reduction));
+    setGlowIntensity(toPercent(preset.glow_intensity));
     const ec = preset.eye_catchlight ?? preset.catchlight_boost ?? 25;
-    handleCatchlightChange(Math.round(ec));
-    setTeethWhitening(Math.round(preset.teeth_whitening));
+    handleCatchlightChange(toPercent(ec));
+    setTeethWhitening(toPercent(preset.teeth_whitening));
     if (preset.lip_color) setLipColor(preset.lip_color);
-    setLipIntensity(Math.round(preset.lip_intensity));
+    setLipIntensity(toPercent(preset.lip_intensity));
     if (preset.loose_hair_cleanup !== undefined && setLooseHairStrength) {
-      setLooseHairStrength(Math.round(preset.loose_hair_cleanup * 100));
+      setLooseHairStrength(toPercent(preset.loose_hair_cleanup));
     }
   };
+
+  const activeProfiles: ColorProfile[] = colorProfiles && colorProfiles.length > 0 ? colorProfiles : [
+    {
+      id: 'clean_commercial',
+      name: 'Clean Commercial Studio',
+      category: 'Commercial',
+      badge: 'Clean Tone',
+      description: 'Clean neutral daylight balance, clean whites, balanced skin tones, and modern clarity.'
+    },
+    {
+      id: 'warm_editorial',
+      name: 'Warm Editorial Magazine',
+      category: 'Editorial',
+      badge: 'Vogue Style',
+      description: 'Lush honeyed highlights, rich mocha shadow tone, and sun-kissed skin luminescence.'
+    },
+    {
+      id: 'cool_executive',
+      name: 'Cool Executive & Academic',
+      category: 'Academic',
+      badge: 'Corporate',
+      description: 'Modern cool 6500K strobe contrast with sharp definition on suits and collars.'
+    },
+    {
+      id: 'golden_hour',
+      name: 'Golden Hour Radiance',
+      category: 'Artistic',
+      badge: 'Warm Glow',
+      description: 'Subtle amber warmth in midtones, lifted shadows, and gentle peach glow.'
+    },
+    {
+      id: 'vibrant_archival',
+      name: 'Vibrant Archival Print',
+      category: 'Print Standard',
+      badge: '300 DPI Lab',
+      description: 'Enhanced color depth optimized for archival photo lab printing and rich velvet.'
+    },
+    {
+      id: 'cinematic_mood',
+      name: 'Cinematic Split-Tone',
+      category: 'Cinematic',
+      badge: '3D LUT',
+      description: 'Subtle split-toning with warm amber highlights and cool teal shadow depth.'
+    },
+    {
+      id: 'monochrome_fine_art',
+      name: 'Monochrome Fine Art',
+      category: 'Monochrome',
+      badge: 'B&W Classic',
+      description: 'Timeless black-and-white tonal scale with deep blacks and luminous skin highlights.'
+    }
+  ];
 
   return (
     <div className="w-80 border-l border-[#30363d] bg-[#161b22] flex flex-col h-full overflow-y-auto text-[#c9d1d9] font-sans text-xs">
@@ -141,16 +220,150 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <div className="p-4 border-b border-[#30363d] flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Sliders className="w-4 h-4 text-[#58a6ff]" />
-          <h2 className="font-bold text-[#f0f6fc]">Retouching &amp; Studio Controls</h2>
+          <h2 className="font-bold text-[#f0f6fc]">Photographer Studio Retouch</h2>
         </div>
+        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#1f6feb]/20 text-[#58a6ff] border border-[#58a6ff]/30">
+          Aftershoot AI
+        </span>
       </div>
 
       <div className="p-4 space-y-6 flex-1">
-        {/* 1. Photographer Presets */}
-        <div className="space-y-2">
+        {/* 0. AI Portrait Appraisal & Auto-Tune */}
+        <div className="p-3 rounded-lg border border-[#30363d] bg-[#0d1117] space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-[#f0f6fc] flex items-center gap-1.5">
+              <Wand2 className="w-3.5 h-3.5 text-amber-400" />
+              <span>AI Vision &amp; Quality Appraisal</span>
+            </span>
+            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-300 border border-amber-400/20">
+              {aiAppraisal?.provider === 'google_gemini' ? 'Gemini Vision AI' : 'Hybrid AI'}
+            </span>
+          </div>
+
+          {aiAppraisal && (
+            <div className="space-y-1.5 text-[11px] bg-[#161b22] p-2.5 rounded border border-[#30363d]">
+              <div className="flex items-center justify-between text-[10px] font-mono">
+                <span className="text-[#8b949e]">Melanin Undertone:</span>
+                <span className="text-amber-200 font-semibold">{aiAppraisal.tone_label || aiAppraisal.skin_undertone || 'Morena Protected'}</span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] font-mono">
+                <span className="text-[#8b949e]">Studio Lighting:</span>
+                <span className="text-[#58a6ff]">{aiAppraisal.lighting_temperature?.replace('_', ' ').toUpperCase() || '5500K STROBE'}</span>
+              </div>
+              <p className="text-[#8b949e] text-[10px] leading-relaxed pt-1 border-t border-[#30363d]">
+                {aiAppraisal.beautify_appraisal}
+              </p>
+            </div>
+          )}
+
+          {onAiAutoTune && (
+            <button
+              onClick={onAiAutoTune}
+              disabled={isAiAutoTuning || isProcessing}
+              className="w-full py-2 px-3 rounded text-xs font-semibold bg-gradient-to-r from-amber-600 via-amber-500 to-amber-600 hover:from-amber-500 hover:to-amber-400 text-black transition flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-black" />
+              <span>{isAiAutoTuning ? 'Analyzing & Tuning...' : 'Run AI Auto-Tune & Harmonize'}</span>
+            </button>
+          )}
+        </div>
+
+        {/* 1. Aftershoot-Style AI Color Profiles & 3D LUTs */}
+        <div className="space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-[#f0f6fc] flex items-center gap-1.5">
+              <Palette className="w-3.5 h-3.5 text-[#58a6ff]" />
+              <span>AI Color Profile &amp; LUT Grading</span>
+            </span>
+            <span className="text-[10px] text-[#8b949e] font-mono">Dynamic Tonal</span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5">
+            {activeProfiles.map((p) => {
+              const isSelected = colorProfile === p.id;
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => setColorProfile && setColorProfile(p.id)}
+                  className={`p-2 rounded border text-left transition relative flex flex-col justify-between ${
+                    isSelected
+                      ? 'border-[#58a6ff] bg-[#1f6feb]/15 text-[#f0f6fc]'
+                      : 'border-[#30363d] bg-[#0d1117] hover:border-[#8b949e] text-[#8b949e]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between w-full mb-1">
+                    <span className="text-[10px] font-mono font-semibold truncate">{p.name.split(' ')[0]}</span>
+                    {p.badge && (
+                      <span className="text-[8px] font-mono px-1 py-0.2 rounded bg-[#21262d] text-[#c9d1d9]">
+                        {p.badge}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[9px] text-[#8b949e] line-clamp-1">{p.description}</span>
+                  {isSelected && (
+                    <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-[#58a6ff]" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Color Adjustments (Warmth, Contrast, Vibrance) */}
+          <div className="p-2.5 rounded border border-[#30363d] bg-[#0d1117] space-y-2 font-mono text-[10px]">
+            <div>
+              <div className="flex justify-between mb-1">
+                <span className="text-[#8b949e]">Color Temperature (Warmth)</span>
+                <span className={colorWarmth > 0 ? 'text-amber-300' : colorWarmth < 0 ? 'text-sky-300' : 'text-[#c9d1d9]'}>
+                  {colorWarmth > 0 ? `+${colorWarmth}` : colorWarmth}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="-50"
+                max="50"
+                value={colorWarmth}
+                onChange={(e) => setColorWarmth && setColorWarmth(Number(e.target.value))}
+                className="w-full h-1 bg-[#30363d] rounded-lg appearance-none cursor-pointer"
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between mb-1">
+                <span className="text-[#8b949e]">Parametric Contrast (S-Curve)</span>
+                <span className="text-[#58a6ff]">{colorContrast > 0 ? `+${colorContrast}` : colorContrast}</span>
+              </div>
+              <input
+                type="range"
+                min="-50"
+                max="50"
+                value={colorContrast}
+                onChange={(e) => setColorContrast && setColorContrast(Number(e.target.value))}
+                className="w-full h-1 bg-[#30363d] rounded-lg appearance-none cursor-pointer"
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between mb-1">
+                <span className="text-[#8b949e]">Skin-Protected Smart Vibrance</span>
+                <span className="text-[#58a6ff]">{colorVibrance > 0 ? `+${colorVibrance}` : colorVibrance}</span>
+              </div>
+              <input
+                type="range"
+                min="-50"
+                max="50"
+                value={colorVibrance}
+                onChange={(e) => setColorVibrance && setColorVibrance(Number(e.target.value))}
+                className="w-full h-1 bg-[#30363d] rounded-lg appearance-none cursor-pointer"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* 2. Photographer Beautification Presets */}
+        <div className="space-y-2 pt-2 border-t border-[#30363d]">
           <div className="flex items-center gap-1.5 text-[#f0f6fc] font-semibold">
             <Sparkles className="w-3.5 h-3.5 text-[#58a6ff]" />
-            <span>Photographer Preset</span>
+            <span>Retouching Preset</span>
           </div>
           <div className="grid grid-cols-3 gap-1.5">
             {beautyPresets.map((p) => {

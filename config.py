@@ -40,7 +40,7 @@ ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/tiff"}
 # Server Config
 PORT = int(os.environ.get("PORT", 8000))
 HOST = os.environ.get("HOST", "127.0.0.1")
-DEBUG = os.environ.get("DEBUG", "True").lower() in ("true", "1", "yes")
+DEBUG = os.environ.get("DEBUG", "False").lower() in ("true", "1", "yes")
 DEFAULT_JWT_SECRET = "kameraph_super_secret_jwt_key_philippines_2026"
 JWT_SECRET = os.environ.get("JWT_SECRET", DEFAULT_JWT_SECRET)
 

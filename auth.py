@@ -112,9 +112,10 @@ async def get_current_user(request: Request) -> Dict[str, Any]:
 async def require_admin(request: Request) -> Dict[str, Any]:
     """Dependency: Requires super_admin role for admin endpoints."""
     # Allow local development bypass only if DEBUG is True and a special dev-admin key is provided
+    is_debug = os.environ.get("DEBUG", "False").lower() in ("true", "1", "yes")
     auth_header = request.headers.get("Authorization") or ""
     admin_secret = os.environ.get("ADMIN_API_KEY", "")
-    if admin_secret and auth_header == f"Bearer {admin_secret}":
+    if is_debug and admin_secret and auth_header == f"Bearer {admin_secret}":
         return {"id": "admin-system", "email": "admin@kameraph.com", "role": "super_admin"}
 
     user = await get_current_user(request)

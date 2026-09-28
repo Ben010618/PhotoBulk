@@ -47,6 +47,15 @@ interface EditorState {
   studioLightIntensity: number;
   rimLightBoost: number;
   togaIron: number;
+  colorProfile: string;
+  colorWarmth: number;
+  colorContrast: number;
+  colorVibrance: number;
+
+  setColorProfile: (profile: string) => void;
+  setColorWarmth: (warmth: number) => void;
+  setColorContrast: (contrast: number) => void;
+  setColorVibrance: (vibrance: number) => void;
 
   setSkinSmoothing: (v: number) => void;
   setBlemishRemoval: (v: number) => void;
@@ -131,6 +140,15 @@ export const useEditorStore = create<EditorState>((set) => ({
   studioLightIntensity: 15,
   rimLightBoost: 12,
   togaIron: 60,
+  colorProfile: 'clean_commercial',
+  colorWarmth: 0,
+  colorContrast: 0,
+  colorVibrance: 0,
+
+  setColorProfile: (profile) => set({ colorProfile: profile }),
+  setColorWarmth: (v) => set({ colorWarmth: v }),
+  setColorContrast: (v) => set({ colorContrast: v }),
+  setColorVibrance: (v) => set({ colorVibrance: v }),
 
   setSkinSmoothing: (v) => set({ skinSmoothing: v }),
   setBlemishRemoval: (v) => set({ blemishRemoval: v }),

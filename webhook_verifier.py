@@ -180,6 +180,14 @@ async def verify_paymongo_webhook(
         if not is_valid:
             logger.warning(f"[webhook_verifier] Rejected invalid webhook request: {error_reason}")
             raise HTTPException(status_code=401, detail=f"Invalid webhook signature: {error_reason}")
+    else:
+        # Fail closed: reject webhooks when no secret is configured
+        is_debug = os.environ.get("DEBUG", "False").lower() in ("true", "1", "yes")
+        if not is_debug:
+            logger.error("[webhook_verifier] PAYMONGO_WEBHOOK_SECRET is not configured — rejecting webhook in production mode.")
+            raise HTTPException(status_code=500, detail="Webhook secret not configured. Cannot verify payment authenticity.")
+        else:
+            logger.warning("[webhook_verifier] PAYMONGO_WEBHOOK_SECRET not set — accepting webhook in DEBUG mode only.")
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))

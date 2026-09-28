@@ -41,21 +41,33 @@ export const ReviewGrid: React.FC<ReviewGridProps> = ({
   onOpenExport,
   onBackToProjects,
 }) => {
-  const [filterMode, setFilterMode] = useState<'all' | 'needs_review' | 'ready'>('all');
+  const [filterMode, setFilterMode] = useState<'all' | 'needs_review' | 'ready' | 'customized'>('all');
+  const [tagFilter, setTagFilter] = useState<'all' | 'blurry' | 'blinking' | 'exposure'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const flaggedPhotos = photos.filter((p) => p.analysis?.review_needed || p.review_needed);
+  const flaggedPhotos = photos.filter((p) => Boolean(p.analysis?.review_needed || p.review_needed));
   const readyPhotos = photos.filter((p) => !p.analysis?.review_needed && !p.review_needed);
+  const customizedPhotos = photos.filter((p) => p.has_user_override);
+  const blurryPhotos = photos.filter((p) => (p.analysis?.sharpness_score ?? 100) < 60);
+  const blinkingPhotos = photos.filter((p) => p.analysis?.eyes_open === false || p.analysis?.blink_status === 'blink');
+  const exposurePhotos = photos.filter((p) => Math.abs(p.analysis?.auto_corrections?.exposure_compensation_ev ?? 0) >= 0.25);
 
   const filtered = photos.filter((p) => {
-    const isFlagged = p.analysis?.review_needed || p.review_needed;
+    const isFlagged = Boolean(p.analysis?.review_needed || p.review_needed);
     if (filterMode === 'needs_review' && !isFlagged) return false;
     if (filterMode === 'ready' && isFlagged) return false;
+    if (filterMode === 'customized' && !p.has_user_override) return false;
+
+    if (tagFilter === 'blurry' && (p.analysis?.sharpness_score ?? 100) >= 60) return false;
+    if (tagFilter === 'blinking' && p.analysis?.eyes_open !== false && p.analysis?.blink_status !== 'blink') return false;
+    if (tagFilter === 'exposure' && Math.abs(p.analysis?.auto_corrections?.exposure_compensation_ev ?? 0) < 0.25) return false;
+
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const matchName = p.name.toLowerCase().includes(q);
       const matchReason = p.analysis?.review_reason?.toLowerCase().includes(q) || false;
-      return matchName || matchReason;
+      const matchAppraisal = (p.analysis?.ai_appraisal?.beautify_appraisal || p.analysis?.plain_summary)?.toLowerCase().includes(q) || false;
+      return matchName || matchReason || matchAppraisal;
     }
     return true;
   });
@@ -118,39 +130,90 @@ export const ReviewGrid: React.FC<ReviewGridProps> = ({
       {/* Filter and Search Bar */}
       <div className="border-b border-[#30363d] bg-[#0d1117] px-6 py-2.5 flex items-center justify-between gap-4">
         {/* Filter Tabs */}
-        <div className="flex items-center gap-1.5 bg-[#161b22] p-1 rounded-md border border-[#30363d]">
-          <button
-            onClick={() => setFilterMode('all')}
-            className={`px-3 py-1 rounded text-xs font-medium transition ${
-              filterMode === 'all'
-                ? 'bg-[#21262d] text-[#f0f6fc] border border-[#30363d]'
-                : 'text-[#8b949e] hover:text-[#c9d1d9]'
-            }`}
-          >
-            All Photos ({photos.length})
-          </button>
-          <button
-            onClick={() => setFilterMode('needs_review')}
-            className={`px-3 py-1 rounded text-xs font-medium transition flex items-center gap-1.5 ${
-              filterMode === 'needs_review'
-                ? 'bg-amber-950/70 text-amber-200 border border-amber-800'
-                : 'text-[#8b949e] hover:text-[#c9d1d9]'
-            }`}
-          >
-            <AlertCircle className="w-3 h-3 text-amber-400" />
-            <span>Needs Review ({flaggedPhotos.length})</span>
-          </button>
-          <button
-            onClick={() => setFilterMode('ready')}
-            className={`px-3 py-1 rounded text-xs font-medium transition flex items-center gap-1.5 ${
-              filterMode === 'ready'
-                ? 'bg-emerald-950/70 text-emerald-200 border border-emerald-800'
-                : 'text-[#8b949e] hover:text-[#c9d1d9]'
-            }`}
-          >
-            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-            <span>Ready ({readyPhotos.length})</span>
-          </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Main Filter Tabs */}
+          <div className="flex items-center gap-1.5 bg-[#161b22] p-1 rounded-md border border-[#30363d]">
+            <button
+              onClick={() => { setFilterMode('all'); setTagFilter('all'); }}
+              className={`px-3 py-1 rounded text-xs font-medium transition ${
+                filterMode === 'all' && tagFilter === 'all'
+                  ? 'bg-[#21262d] text-[#f0f6fc] border border-[#30363d]'
+                  : 'text-[#8b949e] hover:text-[#c9d1d9]'
+              }`}
+            >
+              All ({photos.length})
+            </button>
+            <button
+              onClick={() => { setFilterMode('needs_review'); setTagFilter('all'); }}
+              className={`px-3 py-1 rounded text-xs font-medium transition flex items-center gap-1.5 ${
+                filterMode === 'needs_review'
+                  ? 'bg-amber-950/70 text-amber-200 border border-amber-800'
+                  : 'text-[#8b949e] hover:text-[#c9d1d9]'
+              }`}
+            >
+              <AlertCircle className="w-3 h-3 text-amber-400" />
+              <span>Needs Review ({flaggedPhotos.length})</span>
+            </button>
+            <button
+              onClick={() => { setFilterMode('ready'); setTagFilter('all'); }}
+              className={`px-3 py-1 rounded text-xs font-medium transition flex items-center gap-1.5 ${
+                filterMode === 'ready'
+                  ? 'bg-emerald-950/70 text-emerald-200 border border-emerald-800'
+                  : 'text-[#8b949e] hover:text-[#c9d1d9]'
+              }`}
+            >
+              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+              <span>Ready ({readyPhotos.length})</span>
+            </button>
+            <button
+              onClick={() => { setFilterMode('customized'); setTagFilter('all'); }}
+              className={`px-3 py-1 rounded text-xs font-medium transition flex items-center gap-1.5 ${
+                filterMode === 'customized'
+                  ? 'bg-blue-950/70 text-blue-200 border border-blue-800'
+                  : 'text-[#8b949e] hover:text-[#c9d1d9]'
+              }`}
+            >
+              <Sliders className="w-3 h-3 text-[#58a6ff]" />
+              <span>Customized ({customizedPhotos.length})</span>
+            </button>
+          </div>
+
+          {/* Quick Quality Chips */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setTagFilter(tagFilter === 'blurry' ? 'all' : 'blurry')}
+              className={`px-2 py-0.5 rounded text-[11px] font-mono border transition ${
+                tagFilter === 'blurry'
+                  ? 'bg-red-950/80 border-red-700 text-red-300'
+                  : 'bg-[#161b22] border-[#30363d] text-[#8b949e] hover:text-[#f0f6fc]'
+              }`}
+              title="Show blurry portraits with sharpness score < 60"
+            >
+              ⚡ Blurry ({blurryPhotos.length})
+            </button>
+            <button
+              onClick={() => setTagFilter(tagFilter === 'blinking' ? 'all' : 'blinking')}
+              className={`px-2 py-0.5 rounded text-[11px] font-mono border transition ${
+                tagFilter === 'blinking'
+                  ? 'bg-amber-950/80 border-amber-700 text-amber-300'
+                  : 'bg-[#161b22] border-[#30363d] text-[#8b949e] hover:text-[#f0f6fc]'
+              }`}
+              title="Show portraits with eyes closed or blinking detected"
+            >
+              👁️ Blinking ({blinkingPhotos.length})
+            </button>
+            <button
+              onClick={() => setTagFilter(tagFilter === 'exposure' ? 'all' : 'exposure')}
+              className={`px-2 py-0.5 rounded text-[11px] font-mono border transition ${
+                tagFilter === 'exposure'
+                  ? 'bg-purple-950/80 border-purple-700 text-purple-300'
+                  : 'bg-[#161b22] border-[#30363d] text-[#8b949e] hover:text-[#f0f6fc]'
+              }`}
+              title="Show portraits with exposure compensation adjustment"
+            >
+              ☀️ Exposure ({exposurePhotos.length})
+            </button>
+          </div>
         </div>
 
         {/* Search */}

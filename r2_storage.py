@@ -194,3 +194,26 @@ class R2StorageEngine:
 
 
 storage = R2StorageEngine()
+
+
+def upload_file_to_r2(local_path: str, r2_key: str) -> None:
+    """
+    Uploads a local file to Cloudflare R2 using the singleton storage engine.
+    Used by backup_db.py for off-site backup sync.
+    Falls back gracefully if R2 is not configured.
+    """
+    if not storage.is_configured or storage.s3_client is None:
+        logger.warning(f"[r2_storage] R2 not configured — skipping upload of {r2_key}")
+        return
+
+    try:
+        with open(local_path, "rb") as f:
+            storage.s3_client.put_object(
+                Bucket=storage.bucket_name,
+                Key=r2_key,
+                Body=f
+            )
+        logger.info(f"[r2_storage] Uploaded {local_path} → R2:{r2_key}")
+    except ClientError as e:
+        logger.error(f"[r2_storage] Failed to upload {local_path} to R2: {e}\n{traceback.format_exc()}")
+        raise

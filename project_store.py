@@ -182,6 +182,10 @@ class ProjectStore:
             "rim_light_boost": 0.18,
             "bg_replacement_enabled": True,
             "backdrop_type": "classic_blue",
+            "color_profile": "clean_commercial",
+            "color_warmth": 0.0,
+            "color_contrast": 0.0,
+            "color_vibrance": 0.0,
             "has_user_override": False
         }
         self.save_json(photo_dir / "settings.json", settings)
@@ -401,7 +405,10 @@ class ProjectStore:
                 logger.warning(f"Notice loading masks.npz for {photo_id}: {e}")
 
         # 3. Fast Beauty & Lighting
-        preset_id = active_settings.get("preset_id", "natural")
+        preset_id = active_settings.get("preset_id") or active_settings.get("beauty_preset") or "natural"
+        from beautification_presets import PRESET_ALIASES, apply_aftershoot_color_grading
+        preset_id = PRESET_ALIASES.get(preset_id, preset_id)
+
         if preview_face_info is not None:
             enhanced_preview = apply_beauty_preset_to_image(
                 subject_isolated,
@@ -412,7 +419,7 @@ class ProjectStore:
                 subject_mask=alpha_preview
             )
         else:
-            # Skip facial steps, execute studio lighting
+            # Skip facial steps, execute studio lighting and color profile grading
             lighting_temp = active_settings.get("lighting_temp", "neutral_5500k")
             studio_light_intensity = float(active_settings.get("studio_light_intensity", 0.20))
             rim_light_boost = float(active_settings.get("rim_light_boost", 0.20))
@@ -423,7 +430,30 @@ class ProjectStore:
                 studio_light_intensity=studio_light_intensity,
                 rim_light_boost=rim_light_boost
             )
-            enhanced_preview = np.clip(lit_bgr, 0, 255).astype(np.uint8)
+            color_profile_id = active_settings.get("color_profile", "clean_commercial")
+            color_warmth = float(active_settings.get("color_warmth", 0.0))
+            color_contrast = float(active_settings.get("color_contrast", 0.0))
+            color_vibrance = float(active_settings.get("color_vibrance", 0.0))
+            graded = apply_aftershoot_color_grading(
+                lit_bgr,
+                profile_id=color_profile_id,
+                warmth=color_warmth,
+                contrast=color_contrast,
+                vibrance=color_vibrance
+            )
+            enhanced_preview = np.clip(graded, 0, 255).astype(np.uint8)
+
+        # 4. Save enhanced preview and crops to disk for immediate serving
+        enhanced_path = photo_dir / "preview_enhanced.jpg"
+        cv2.imwrite(str(enhanced_path), enhanced_preview, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
+        try:
+            crop_8r = crop_8r_aspect(enhanced_preview)
+            cv2.imwrite(str(photo_dir / "preview_8R.jpg"), crop_8r, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            crop_2x2 = crop_2x2_id(enhanced_preview, preview_face_info)
+            cv2.imwrite(str(photo_dir / "preview_2x2.jpg"), crop_2x2, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        except Exception as crop_err:
+            logger.warning(f"Preview crop precomputation notice for {photo_id}: {crop_err}")
 
         # Cache active settings
         if custom_settings:
@@ -518,7 +548,10 @@ class ProjectStore:
                 logger.warning(f"Notice loading full masks.npz for {photo_id}: {e}")
 
         # 3. Beauty & Studio Lighting
-        preset_id = active_settings.get("preset_id", "natural")
+        preset_id = active_settings.get("preset_id") or active_settings.get("beauty_preset") or "natural"
+        from beautification_presets import PRESET_ALIASES, apply_aftershoot_color_grading
+        preset_id = PRESET_ALIASES.get(preset_id, preset_id)
+
         if face_info is not None:
             enhanced_bgr = apply_beauty_preset_to_image(
                 subject_isolated,
@@ -539,7 +572,18 @@ class ProjectStore:
                 studio_light_intensity=studio_light_intensity,
                 rim_light_boost=rim_light_boost
             )
-            enhanced_bgr = np.clip(lit_bgr, 0, 255).astype(np.uint8)
+            color_profile_id = active_settings.get("color_profile", "clean_commercial")
+            color_warmth = float(active_settings.get("color_warmth", 0.0))
+            color_contrast = float(active_settings.get("color_contrast", 0.0))
+            color_vibrance = float(active_settings.get("color_vibrance", 0.0))
+            graded = apply_aftershoot_color_grading(
+                lit_bgr,
+                profile_id=color_profile_id,
+                warmth=color_warmth,
+                contrast=color_contrast,
+                vibrance=color_vibrance
+            )
+            enhanced_bgr = np.clip(graded, 0, 255).astype(np.uint8)
 
         # 3. Print Crops
         crop_8r = crop_8r_aspect(enhanced_bgr)
@@ -572,18 +616,30 @@ class ProjectStore:
         is_user_override: bool = True
     ) -> Dict[str, Any]:
         """Saves custom settings for a specific photo and marks it as user-overridden."""
-        from beautification_presets import BEAUTY_PRESETS
-        from background_engine import STUDIO_BACKDROPS
+        from beautification_presets import BEAUTY_PRESETS, PRESET_ALIASES, AFTERSHOOT_COLOR_PROFILES
+        from background_engine import STUDIO_BACKDROPS, BACKDROP_ALIASES
 
-        if "preset_id" in settings and settings["preset_id"] not in BEAUTY_PRESETS:
+        if "preset_id" in settings or "beauty_preset" in settings:
+            raw_pid = settings.get("preset_id") or settings.get("beauty_preset")
+            pid = PRESET_ALIASES.get(raw_pid, raw_pid)
+            if pid not in BEAUTY_PRESETS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown preset: '{raw_pid}'. Valid presets: {list(BEAUTY_PRESETS.keys())}"
+                )
+            settings["preset_id"] = pid
+            settings["beauty_preset"] = pid
+        if "backdrop_type" in settings:
+            b_id = BACKDROP_ALIASES.get(settings["backdrop_type"], settings["backdrop_type"])
+            if b_id not in STUDIO_BACKDROPS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown backdrop_type: '{settings['backdrop_type']}'. Valid backdrops: {list(STUDIO_BACKDROPS.keys())}"
+                )
+        if "color_profile" in settings and settings["color_profile"] not in AFTERSHOOT_COLOR_PROFILES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown preset_id: '{settings['preset_id']}'. Valid presets: {list(BEAUTY_PRESETS.keys())}"
-            )
-        if "backdrop_type" in settings and settings["backdrop_type"] not in STUDIO_BACKDROPS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown backdrop_type: '{settings['backdrop_type']}'. Valid backdrops: {list(STUDIO_BACKDROPS.keys())}"
+                detail=f"Unknown color_profile: '{settings['color_profile']}'. Valid profiles: {list(AFTERSHOOT_COLOR_PROFILES.keys())}"
             )
 
         photo_dir = self.get_photo_dir(project_id, photo_id)

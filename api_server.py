@@ -57,7 +57,7 @@ from init_db import (
     fetch_job_db,
     recover_interrupted_jobs
 )
-from config import PAYMENTS_ENABLED, check_jwt_secret_security
+from config import PAYMENTS_ENABLED, check_jwt_secret_security, DEBUG as CONFIG_DEBUG
 from auth import get_current_user, get_current_user_optional, require_admin, authenticate_user, create_access_token
 from r2_storage import (
     storage,
@@ -68,7 +68,7 @@ from r2_storage import (
 from payment_engine import payment_engine
 from webhook_verifier import verify_paymongo_webhook, PayMongoWebhookResult, webhook_verifier
 from background_engine import generate_studio_backdrop, composite_subject_onto_backdrop, STUDIO_BACKDROPS
-from beautification_presets import BEAUTY_PRESETS, LIP_COLOR_PALETTES
+from beautification_presets import BEAUTY_PRESETS, LIP_COLOR_PALETTES, AFTERSHOOT_COLOR_PROFILES
 from analyzer_engine import analyze_portrait
 from regalia_profiles import REGALIA_PROFILES
 from pdf_engine import generate_contact_sheet_pdf, generate_lab_gang_sheet_pdf, generate_batch_lab_gang_sheet_pdf
@@ -147,7 +147,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="KameraPh Studio Engine API", version="5.2.0", lifespan=lifespan)
 
 # 1. Tightened Production CORS Configuration
-is_production = os.environ.get("DEBUG", "False").lower() in ("false", "0", "no")
+is_production = not CONFIG_DEBUG
 frontend_url = os.environ.get("FRONTEND_URL", "").strip()
 raw_origins = os.environ.get(
     "ALLOWED_ORIGINS", 
@@ -187,7 +187,7 @@ DEFAULT_GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 AI_CONFIG = {
     "api_key": DEFAULT_GEMINI_KEY,
     "provider": os.environ.get("AI_PROVIDER", "google_gemini"),
-    "model": os.environ.get("AI_MODEL", "gemini-3.1-flash-lite"),
+    "model": os.environ.get("AI_MODEL", "gemini-2.5-flash"),
     "beautify_mode": os.environ.get("AI_BEAUTIFY_MODE", "ai_neural_frequency"),
     "status": "active" if DEFAULT_GEMINI_KEY else "local_fallback",
     "last_tested": time.strftime('%Y-%m-%d %H:%M:%S UTC')
@@ -344,7 +344,7 @@ def validate_image_upload(contents: bytes, filename: str, content_type: Optional
 
 
 def get_gemini_vision_analysis(img_bgr: np.ndarray, cache_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Cached and non-blocking Google Gemini Multimodal Vision analysis."""
+    """Cached and robust Google Gemini Multimodal Vision analysis with model fallbacks."""
     if not AI_CONFIG.get("api_key") or AI_CONFIG.get("status") != "active":
         return None
 
@@ -363,31 +363,132 @@ def get_gemini_vision_analysis(img_bgr: np.ndarray, cache_key: Optional[str] = N
 
         client = genai.Client(api_key=AI_CONFIG["api_key"])
         prompt = (
-            "Analyze this portrait for a professional photography studio. "
-            "Output a JSON payload with: "
-            "skin_undertone ('warm_morena', 'fair', or 'cool'), "
-            "lighting_temperature ('cool_5500k', 'warm_3200k', or 'neutral'), "
-            "blemish_score (integer 0-100), "
-            "beautify_appraisal (concise natural language assessment of skin texture and studio strobe lighting)."
+            "You are a master Philippine portrait photography studio AI consultant. Analyze this graduation portrait. "
+            "Return valid JSON ONLY with these exact keys:\n"
+            "{\n"
+            '  "skin_undertone": "warm_morena" or "fair" or "cool",\n'
+            '  "tone_label": "Morena (Warm Golden Undertone - Protected)" or "Fair Neutral" or "Cool Rosy",\n'
+            '  "lighting_temperature": "neutral_5500k" or "warm_3200k" or "cool_6500k",\n'
+            '  "blemish_score": integer 0-100,\n'
+            '  "beautify_appraisal": "detailed natural language assessment of facial clarity, skin melanin fidelity, and studio lighting",\n'
+            '  "recommended_preset": "natural" or "studio_glow" or "yearbook_classic",\n'
+            '  "recommended_color_profile": "clean_commercial" or "warm_editorial" or "cool_executive" or "golden_hour" or "vibrant_archival"\n'
+            "}"
         )
 
-        response = client.models.generate_content(
-            model=AI_CONFIG.get("model", "gemini-3.1-flash-lite"),
-            contents=[pil_img, prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
+        candidate_models = [
+            AI_CONFIG.get("model", "gemini-2.5-flash"),
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-flash-latest",
+        ]
+        # Deduplicate while preserving order
+        models_to_try = list(dict.fromkeys(candidate_models))
 
-        if response and response.text:
-            data = json.loads(response.text)
-            data["active"] = True
-            data["model_used"] = AI_CONFIG.get("model", "gemini-3.1-flash-lite")
-            if cache_key:
-                _GEMINI_VISION_CACHE[cache_key] = data
-            return data
+        for m in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=m,
+                    contents=[pil_img, prompt],
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                if response and response.text:
+                    clean_text = response.text.strip()
+                    if clean_text.startswith("```"):
+                        clean_text = clean_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                    data = json.loads(clean_text)
+                    data["active"] = True
+                    data["provider"] = "google_gemini"
+                    data["model_used"] = m
+                    if cache_key:
+                        _GEMINI_VISION_CACHE[cache_key] = data
+                    return data
+            except Exception as model_err:
+                logger.warning(f"Gemini model {m} vision attempt notice: {model_err}")
+                continue
     except Exception as e:
-        print("Gemini vision query notice:", e)
+        logger.warning(f"Gemini vision query exception: {e}")
 
     return None
+
+
+def get_local_ai_appraisal(img_bgr: np.ndarray, analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Provides instant, local zero-cost AI portrait appraisal and tuning recommendations."""
+    if analysis is None:
+        analysis = analyze_portrait(img_bgr)
+
+    wb_cast = analysis.get("white_balance_cast") or {}
+    delta_b = float(wb_cast.get("delta_b", 0.0))
+    skin_texture = float(analysis.get("skin_texture_score", 0.35))
+    sharpness = float(analysis.get("sharpness_score", 75.0))
+    face_exp = float(analysis.get("face_exposure", 128.0))
+    ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
+
+    if delta_b > 2.0 or (face_exp >= 115 and face_exp <= 170):
+        skin_undertone = "warm_morena"
+        tone_label = "Morena (Warm Golden Undertone - Protected)"
+    elif delta_b < -4.0:
+        skin_undertone = "cool"
+        tone_label = "Cool Rosy Undertone"
+    else:
+        skin_undertone = "fair"
+        tone_label = "Neutral Balanced Skin Tone"
+
+    if delta_b > 10.0:
+        lighting_temp = "warm_3200k"
+    elif delta_b < -10.0:
+        lighting_temp = "cool_6500k"
+    else:
+        lighting_temp = "neutral_5500k"
+
+    blemish_score = int(np.clip(skin_texture * 100.0, 10, 85))
+
+    if skin_texture > 0.55:
+        rec_preset = "studio_glow"
+    elif sharpness > 80.0:
+        rec_preset = "natural"
+    else:
+        rec_preset = "yearbook_classic"
+
+    if lighting_temp == "warm_3200k":
+        rec_profile = "warm_editorial"
+    elif lighting_temp == "cool_6500k":
+        rec_profile = "cool_executive"
+    else:
+        rec_profile = "clean_commercial"
+
+    appraisal = (
+        f"{tone_label}. Studio sharpness is rated {sharpness:.0f}/100 ({analysis.get('sharpness_grade', 'Crisp')}). "
+        f"Lighting is calibrated to {lighting_temp.replace('_', ' ').title()}"
+    )
+    if abs(ev) >= 0.15:
+        appraisal += f" with auto-exposure harmonization of {ev:+.1f} EV."
+    else:
+        appraisal += " with balanced key lighting."
+
+    return {
+        "active": True,
+        "provider": "local_hybrid",
+        "model_used": "Local OpenCV DNN & CIELAB Hybrid",
+        "skin_undertone": skin_undertone,
+        "tone_label": tone_label,
+        "lighting_temperature": lighting_temp,
+        "blemish_score": blemish_score,
+        "beautify_appraisal": appraisal,
+        "recommended_preset": rec_preset,
+        "recommended_color_profile": rec_profile,
+        "auto_corrections": analysis.get("auto_corrections", {})
+    }
+
+
+def get_unified_ai_appraisal(img_bgr: np.ndarray, analysis: Optional[Dict[str, Any]] = None, cache_key: Optional[str] = None) -> Dict[str, Any]:
+    """Dispatches to Google Gemini Multimodal Vision when active, otherwise local CIELAB hybrid."""
+    gemini_result = get_gemini_vision_analysis(img_bgr, cache_key=cache_key)
+    if gemini_result:
+        return gemini_result
+    return get_local_ai_appraisal(img_bgr, analysis=analysis)
 
 
 def image_to_base64_data_uri(img_bgr: np.ndarray, quality: int = 85) -> str:
@@ -482,6 +583,12 @@ def get_regalia_profiles_endpoint():
     return list(REGALIA_PROFILES.values())
 
 
+@app.get("/api/color-profiles")
+def get_color_profiles_endpoint():
+    """Returns professional Aftershoot-style AI color profiles and 3D LUT styles."""
+    return list(AFTERSHOOT_COLOR_PROFILES.values())
+
+
 @app.post("/api/analyze-photo")
 def analyze_photo_endpoint(file: UploadFile = File(...)):
     """Runs Aftershoot-style AI culling and quality metrics with multi-face detection."""
@@ -555,13 +662,27 @@ async def test_ai_key_endpoint(
     """Accurately verifies the AI API key with Google Gemini; reports real failures."""
     key_to_test = api_key.strip() or AI_CONFIG.get("api_key", "")
     if not key_to_test:
-        raise HTTPException(status_code=400, detail="No API key provided. Please input an API key.")
+        return JSONResponse(status_code=400, content={
+            "success": False,
+            "message": "No API key provided. Please paste your Google Gemini API Key (starts with AIzaSy) in the input box and click Test.",
+            "status": "error"
+        })
     
     try:
         from google import genai
         client = genai.Client(api_key=key_to_test)
         
-        models = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash']
+        candidate_models = [
+            AI_CONFIG.get("model", "gemini-2.5-flash"),
+            'gemini-2.5-flash',
+            'gemini-2.0-flash',
+            'gemini-1.5-flash',
+            'gemini-2.5-pro',
+            'gemini-3.1-flash-lite',
+            'gemini-flash-latest',
+            'gemini-3.8-flash'
+        ]
+        models = list(dict.fromkeys(candidate_models))
         connected_model = None
         resp_text = ""
         last_error = ""
@@ -593,7 +714,6 @@ async def test_ai_key_endpoint(
                 "status": "active"
             }
         else:
-            # Report real failure instead of masking it
             return JSONResponse(status_code=400, content={
                 "success": False,
                 "message": f"Google Gemini connectivity failed: {last_error or 'No response from models'}",
@@ -655,6 +775,47 @@ async def payment_webhook_endpoint(
     except Exception as e:
         logger.error(f"[api_server] Error processing verified payment webhook: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Webhook processing error: {str(e)}")
+
+
+@app.get("/api/payments/checkout-mock")
+async def mock_checkout_endpoint(
+    session_id: str = Query(...),
+    pkg: str = Query("school_500"),
+    amount: float = Query(0)
+):
+    """
+    Test-mode mock checkout handler. Simulates a successful PayMongo payment
+    by auto-confirming the pending transaction and crediting the studio.
+    Only available when PayMongo is using test keys (prv_test_*).
+    """
+    if payment_engine.is_live:
+        raise HTTPException(status_code=403, detail="Mock checkout not available in live payment mode")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM transactions WHERE paymongo_session_id = ?", (session_id,))
+        txn = cursor.fetchone()
+        if not txn:
+            raise HTTPException(status_code=404, detail=f"No pending transaction for session {session_id}")
+
+        if txn["payment_status"] != "paid":
+            credits_to_add = txn["credits_added"]
+            studio_id = txn["studio_id"]
+
+            cursor.execute("""
+                UPDATE transactions SET payment_status = 'paid', payment_method = 'test_mock'
+                WHERE paymongo_session_id = ?;
+            """, (session_id,))
+            cursor.execute("UPDATE studios SET credit_balance = credit_balance + ? WHERE id = ?;", (credits_to_add, studio_id))
+            conn.commit()
+            logger.info(f"[mock_checkout] Test payment confirmed: session={session_id}, credits={credits_to_add}, studio={studio_id}")
+    finally:
+        conn.close()
+
+    from fastapi.responses import RedirectResponse
+    frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+    return RedirectResponse(url=f"{frontend_url}/?payment=success&session_id={session_id}")
 
 
 # =========================================================================
@@ -926,14 +1087,12 @@ def get_photo_proof(photo_id: str, student_name: str = Query("Juan Dela Cruz")):
 @app.get("/proof/{student_id}")
 @app.get("/api/proof/{student_id}")
 def verify_student_proof(student_id: str):
-    """Public student proof verification endpoint accessed via QR code."""
+    """Photographer proof record verification endpoint."""
     return {
         "status": "verified",
-        "student_id": student_id,
-        "school": "Manila Science High School",
-        "watermark_status": "official_studio_proof",
-        "studio": "AuraGrad Creative Studio",
-        "message": "Valid graduation proof record. Official 300DPI prints unlocked upon batch approval."
+        "reference_id": student_id,
+        "type": "studio_photographer_proof",
+        "message": "Authentic studio portrait proof generated by KameraPh Studio Suite."
     }
 
 
@@ -1212,12 +1371,133 @@ def get_project_photo_preview(
     check_project_ownership(project_id, current_user)
     validate_id(photo_id, "photo_id")
     photo_dir = project_store.get_photo_dir(project_id, photo_id)
+    enhanced_p = photo_dir / "preview_enhanced.jpg"
+    if enhanced_p.exists():
+        return FileResponse(str(enhanced_p), media_type="image/jpeg")
     preview_p = photo_dir / "preview.jpg"
     if not preview_p.exists():
         preview_p = photo_dir / "original.jpg"
     if not preview_p.exists():
         raise HTTPException(status_code=404, detail="Photo not found")
     return FileResponse(str(preview_p), media_type="image/jpeg")
+
+@app.get("/api/projects/{project_id}/photos/{photo_id}/crop-8r")
+def get_project_photo_crop_8r(
+    project_id: str,
+    photo_id: str,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    check_project_ownership(project_id, current_user)
+    validate_id(photo_id, "photo_id")
+    photo_dir = project_store.get_photo_dir(project_id, photo_id)
+    for fname in ["render_8R.jpg", "preview_8R.jpg"]:
+        fpath = photo_dir / fname
+        if fpath.exists():
+            return FileResponse(str(fpath), media_type="image/jpeg")
+    
+    src_p = photo_dir / "preview_enhanced.jpg"
+    if not src_p.exists():
+        src_p = photo_dir / "preview.jpg"
+    if not src_p.exists():
+        src_p = photo_dir / "original.jpg"
+    if not src_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+    img = cv2.imread(str(src_p))
+    crop = crop_8r_aspect(img)
+    _, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+@app.get("/api/projects/{project_id}/photos/{photo_id}/crop-2x2")
+def get_project_photo_crop_2x2(
+    project_id: str,
+    photo_id: str,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    check_project_ownership(project_id, current_user)
+    validate_id(photo_id, "photo_id")
+    photo_dir = project_store.get_photo_dir(project_id, photo_id)
+    for fname in ["render_2x2.jpg", "preview_2x2.jpg"]:
+        fpath = photo_dir / fname
+        if fpath.exists():
+            return FileResponse(str(fpath), media_type="image/jpeg")
+
+    src_p = photo_dir / "preview_enhanced.jpg"
+    if not src_p.exists():
+        src_p = photo_dir / "preview.jpg"
+    if not src_p.exists():
+        src_p = photo_dir / "original.jpg"
+    if not src_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+    img = cv2.imread(str(src_p))
+    face_info = project_store.load_json(photo_dir / "face.json")
+    crop = crop_2x2_id(img, face_info)
+    _, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+@app.post("/api/projects/{project_id}/photos/{photo_id}/ai-appraisal")
+def trigger_photo_ai_appraisal(
+    project_id: str,
+    photo_id: str,
+    auto_apply: bool = Query(False),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Executes Multimodal Gemini Vision AI appraisal or local hybrid fallback diagnostics."""
+    check_project_ownership(project_id, current_user)
+    validate_id(photo_id, "photo_id")
+    photo_dir = project_store.get_photo_dir(project_id, photo_id)
+
+    src_p = photo_dir / "preview.jpg"
+    if not src_p.exists():
+        src_p = photo_dir / "original.jpg"
+    if not src_p.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+    img_bgr = cv2.imread(str(src_p))
+    if img_bgr is None:
+        raise HTTPException(status_code=500, detail="Failed to decode portrait image")
+
+    analysis = project_store.load_json(photo_dir / "analysis.json") or analyze_portrait(img_bgr)
+    appraisal = get_unified_ai_appraisal(img_bgr, analysis=analysis, cache_key=f"{project_id}_{photo_id}")
+
+    # Merge appraisal into analysis.json
+    analysis["ai_appraisal"] = appraisal
+    project_store.save_json(photo_dir / "analysis.json", analysis)
+
+    applied_settings = None
+    render_lat = 0
+    if auto_apply:
+        cur_settings = project_store.load_json(photo_dir / "settings.json") or {}
+        auto_adjustments = {
+            "beauty_preset": appraisal.get("recommended_preset", "natural"),
+            "preset_id": appraisal.get("recommended_preset", "natural"),
+            "color_profile": appraisal.get("recommended_color_profile", "clean_commercial"),
+            "lighting_temp": appraisal.get("lighting_temperature", "neutral_5500k"),
+        }
+        if "auto_corrections" in appraisal and "exposure_compensation_ev" in appraisal["auto_corrections"]:
+            auto_adjustments["exposure_compensation_ev"] = appraisal["auto_corrections"]["exposure_compensation_ev"]
+        applied_settings = project_store.update_photo_settings(
+            project_id, photo_id, auto_adjustments, is_user_override=True
+        )
+        _, render_lat = project_store.render_preview_fast(project_id, photo_id, custom_settings=applied_settings)
+
+    return {
+        "success": True,
+        "appraisal": appraisal,
+        "auto_applied": auto_apply,
+        "settings": applied_settings,
+        "render_latency_ms": render_lat
+    }
+
+@app.post("/api/projects/{project_id}/photos/{photo_id}/auto-enhance")
+def auto_enhance_photo_endpoint(
+    project_id: str,
+    photo_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Automatically tunes portrait exposure, white balance, smoothing, and color profile."""
+    return trigger_photo_ai_appraisal(project_id, photo_id, auto_apply=True, current_user=current_user)
 
 @app.get("/api/projects/{project_id}/photos/{photo_id}/original")
 def get_project_photo_original(
@@ -1244,6 +1524,8 @@ def get_project_photo_master(
     master_p = photo_dir / "render_master.jpg"
     if not master_p.exists():
         master_p = photo_dir / "master.jpg"
+    if not master_p.exists():
+        master_p = photo_dir / "preview_enhanced.jpg"
     if not master_p.exists():
         master_p = photo_dir / "original.jpg"
     if not master_p.exists():

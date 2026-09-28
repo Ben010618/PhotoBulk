@@ -81,6 +81,9 @@ class TestKameraPhSuite(unittest.TestCase):
 
         cls.test_img = cls.astronaut_bgr
         cls.face_img = cls.astronaut_bgr
+        local_data_dir = Path(BASE_DIR) / "local_data"
+        cls.initial_local_projects = set((local_data_dir / "projects").glob("*")) if (local_data_dir / "projects").exists() else set()
+        cls.initial_local_exports = set((local_data_dir / "exports").glob("*")) if (local_data_dir / "exports").exists() else set()
 
     def tearDown(self):
         import gc
@@ -941,11 +944,13 @@ class TestKameraPhSuite(unittest.TestCase):
         from config import DATA_DIR, BASE_DIR
         local_data_dir = BASE_DIR / "local_data"
         self.assertNotEqual(str(DATA_DIR), str(local_data_dir), "DATA_DIR must be an isolated temporary directory during testing")
-        # Assert that local_data/projects is completely empty
-        local_projects = list((local_data_dir / "projects").glob("*"))
-        self.assertEqual(len(local_projects), 0, f"local_data/projects must not contain test projects: {local_projects}")
-        local_exports = list((local_data_dir / "exports").glob("*"))
-        self.assertEqual(len(local_exports), 0, f"local_data/exports must not contain test exports: {local_exports}")
+        # Assert that local_data was not polluted by test runs
+        current_local_projects = set((local_data_dir / "projects").glob("*")) if (local_data_dir / "projects").exists() else set()
+        test_leaked_projects = current_local_projects - getattr(self, "initial_local_projects", set())
+        self.assertEqual(len(test_leaked_projects), 0, f"local_data/projects must not contain leaked test projects: {test_leaked_projects}")
+        current_local_exports = set((local_data_dir / "exports").glob("*")) if (local_data_dir / "exports").exists() else set()
+        test_leaked_exports = current_local_exports - getattr(self, "initial_local_exports", set())
+        self.assertEqual(len(test_leaked_exports), 0, f"local_data/exports must not contain leaked test exports: {test_leaked_exports}")
 
     def test_27_phase0_astronaut_face_detection_variants(self):
         """Phase 0: Face detection must pass on standard astronaut, darkened copy, and 3000px upscaled copy."""

@@ -1,5 +1,5 @@
-import React from 'react';
-import { ZoomIn, ZoomOut, AlertCircle, CheckCircle2, Star, Sparkles } from 'lucide-react';
+import React, { useRef } from 'react';
+import { ZoomIn, ZoomOut, AlertCircle, CheckCircle2, Star, Sparkles, Download } from 'lucide-react';
 import { PhotoItem } from '../types';
 
 interface PhotoComparisonViewerProps {
@@ -13,6 +13,7 @@ interface PhotoComparisonViewerProps {
   containerRef: React.RefObject<HTMLDivElement | null>;
   isDragging: boolean;
   setIsDragging: (dragging: boolean) => void;
+  onDownloadActive?: () => void;
 }
 
 export const PhotoComparisonViewer: React.FC<PhotoComparisonViewerProps> = ({
@@ -26,7 +27,9 @@ export const PhotoComparisonViewer: React.FC<PhotoComparisonViewerProps> = ({
   containerRef,
   isDragging,
   setIsDragging,
+  onDownloadActive,
 }) => {
+  const imageRef = useRef<HTMLImageElement>(null);
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!isDragging || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
@@ -100,6 +103,18 @@ export const PhotoComparisonViewer: React.FC<PhotoComparisonViewerProps> = ({
         >
           {isZoomed ? <ZoomOut className="w-4 h-4" /> : <ZoomIn className="w-4 h-4" />}
         </button>
+
+        {/* Quick Download Active Photo */}
+        {onDownloadActive && activePhoto?.enhancedUrl && (
+          <button
+            onClick={onDownloadActive}
+            className="p-1 rounded hover:bg-[#21262d] text-[#58a6ff] hover:text-[#79c0ff] transition flex items-center gap-1 text-[11px] font-mono px-2 border border-[#30363d]"
+            title="Download Active 300 DPI Portrait"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Download</span>
+          </button>
+        )}
       </div>
 
       {/* Main Canvas Comparison Area */}
@@ -120,6 +135,7 @@ export const PhotoComparisonViewer: React.FC<PhotoComparisonViewerProps> = ({
           >
             {/* Enhanced Image (Base Layer) */}
             <img
+              ref={imageRef}
               src={currentEnhanced}
               alt="Enhanced Portrait"
               className="max-h-[70vh] object-contain rounded shadow-lg pointer-events-none"
@@ -135,7 +151,7 @@ export const PhotoComparisonViewer: React.FC<PhotoComparisonViewerProps> = ({
                   src={currentOriginal}
                   alt="Original Portrait"
                   className="max-h-[70vh] object-contain rounded pointer-events-none max-w-none"
-                  style={{ width: containerRef.current?.clientWidth }}
+                  style={{ width: imageRef.current?.clientWidth }}
                 />
               </div>
             )}

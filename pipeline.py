@@ -113,6 +113,10 @@ class ProcessingParams(BaseModel):
     studio_light_intensity: float = Field(default=0.20, ge=0.0, le=1.0)
     rim_light_boost: float = Field(default=0.18, ge=0.0, le=1.0)
     iron_strength: float = Field(default=0.70, ge=0.0, le=1.0)
+    color_profile: str = "clean_commercial"
+    color_warmth: float = 0.0
+    color_contrast: float = 0.0
+    color_vibrance: float = 0.0
     output_directory: Optional[str] = None
     save_crops: bool = True
     save_proof: bool = False
@@ -358,7 +362,11 @@ def process_complete_workflow(
     analysis_data: Optional[Dict[str, Any]] = None,
     backdrop_mode: Optional[str] = None,
     loose_hair_cleanup: Optional[float] = None,
-    keep_moles: bool = True
+    keep_moles: bool = True,
+    color_profile: str = "clean_commercial",
+    color_warmth: float = 0.0,
+    color_contrast: float = 0.0,
+    color_vibrance: float = 0.0
 ) -> Tuple[np.ndarray, int, Optional[Dict[str, Any]], str]:
     """
     Executes the full graduation photo processing workflow:
@@ -474,7 +482,11 @@ def process_complete_workflow(
                 "rim_light_boost": rim_light_boost,
                 "iron_strength": iron_strength,
                 "loose_hair_cleanup": loose_hair_cleanup or 0.40,
-                "keep_moles": keep_moles
+                "keep_moles": keep_moles,
+                "color_profile": color_profile,
+                "color_warmth": color_warmth,
+                "color_contrast": color_contrast,
+                "color_vibrance": color_vibrance
             },
             subject_mask=subject_mask
         )
@@ -545,7 +557,11 @@ def process_image(
             rim_light_boost=params.rim_light_boost,
             iron_strength=params.iron_strength,
             loose_hair_cleanup=params.loose_hair_cleanup,
-            keep_moles=params.keep_moles
+            keep_moles=params.keep_moles,
+            color_profile=params.color_profile,
+            color_warmth=params.color_warmth,
+            color_contrast=params.color_contrast,
+            color_vibrance=params.color_vibrance
         )
 
         # 3. Compute High-Precision Standard Prints

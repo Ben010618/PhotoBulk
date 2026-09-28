@@ -15,6 +15,7 @@ import {
   BatchUploadResponse,
   BulkExportRequest,
   CheckoutResponse,
+  ColorProfile,
   ExportJobStatus,
   HealthResponse,
   JobStatusResponse,
@@ -168,6 +169,19 @@ export const apiClient = {
       return res.data;
     } catch (err: unknown) {
       console.warn('[apiClient.fetchRegaliaProfiles] Falling back to default profiles:', err);
+      return [];
+    }
+  },
+
+  /**
+   * Aftershoot-Style AI Color Profiles & 3D LUTs
+   */
+  async fetchColorProfiles(): Promise<ColorProfile[]> {
+    try {
+      const res = await axiosInstance.get<ColorProfile[]>('/api/color-profiles');
+      return res.data;
+    } catch (err: unknown) {
+      console.warn('[apiClient.fetchColorProfiles] Falling back to default profiles:', err);
       return [];
     }
   },
@@ -520,6 +534,41 @@ export const apiClient = {
       console.error(`[apiClient.clearPhotoOverride] Error clearing override for ${photoId}:`, err);
       throw err;
     }
+  },
+
+  async getPhotoAiAppraisal(
+    projectId: string,
+    photoId: string,
+    autoApply: boolean = false
+  ): Promise<{
+    success: boolean;
+    appraisal: any;
+    auto_applied: boolean;
+    settings?: Record<string, any>;
+    render_latency_ms: number;
+  }> {
+    try {
+      const res = await axiosInstance.post(
+        `/api/projects/${projectId}/photos/${photoId}/ai-appraisal?auto_apply=${autoApply}`
+      );
+      return res.data;
+    } catch (err: unknown) {
+      console.error(`[apiClient.getPhotoAiAppraisal] Error getting AI appraisal for ${photoId}:`, err);
+      throw err;
+    }
+  },
+
+  async autoEnhancePhoto(
+    projectId: string,
+    photoId: string
+  ): Promise<{
+    success: boolean;
+    appraisal: any;
+    auto_applied: boolean;
+    settings?: Record<string, any>;
+    render_latency_ms: number;
+  }> {
+    return this.getPhotoAiAppraisal(projectId, photoId, true);
   },
 
   async applyToAll(

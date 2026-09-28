@@ -56,3 +56,25 @@ REGALIA_PROFILES = {
         "description": "Soft smoothing for satin/cotton gowns and lace ribbons."
     }
 }
+
+# Aliases for frontend IDs that differ from backend canonical IDs
+REGALIA_ALIASES = {
+    "ph_academic_toga": "standard_toga",
+    "formal_blazer": "barong_tagalog",
+    "suit_and_tie": "barong_tagalog",
+    "academic_toga": "standard_toga",
+}
+
+
+def get_regalia_profile(profile_id: str) -> dict:
+    """
+    Looks up a regalia profile by ID, resolving aliases to canonical IDs.
+    Returns the standard_toga profile as fallback if the ID is unknown.
+    """
+    # Direct match first
+    if profile_id in REGALIA_PROFILES:
+        return REGALIA_PROFILES[profile_id]
+
+    # Try alias resolution
+    canonical = REGALIA_ALIASES.get(profile_id, "standard_toga")
+    return REGALIA_PROFILES.get(canonical, REGALIA_PROFILES["standard_toga"])

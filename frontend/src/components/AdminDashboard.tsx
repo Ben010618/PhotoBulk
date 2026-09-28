@@ -137,10 +137,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate, curr
         setAiStatus('active');
         setLastTested(new Date().toLocaleTimeString());
       }
-    } catch (e: unknown) {
+    } catch (e: any) {
+      const msg =
+        e?.response?.data?.message ||
+        e?.response?.data?.detail ||
+        e?.message ||
+        'Network error while communicating with AI service.';
       setTestResult({
         success: false,
-        message: 'Network request error while testing AI API Key.',
+        message: msg,
       });
     } finally {
       setIsTesting(false);
@@ -745,10 +750,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate, curr
                       onChange={(e) => setModel(e.target.value)}
                       className="w-full bg-[#0d1117] border border-[#30363d] rounded p-2 text-[#f0f6fc] font-mono focus:outline-none focus:border-[#f0f6fc]"
                     >
-                      <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Active &amp; Recommended - Sub-second throughput)</option>
+                      <option value="gemini-2.5-flash">gemini-2.5-flash (Official Recommended - Sub-second multimodal throughput)</option>
+                      <option value="gemini-2.0-flash">gemini-2.0-flash (Fast Multimodal Production)</option>
+                      <option value="gemini-1.5-flash">gemini-1.5-flash (Standard Production)</option>
+                      <option value="gemini-2.5-pro">gemini-2.5-pro (High-Precision Analytical Vision)</option>
+                      <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Ultra-Lightweight)</option>
                       <option value="gemini-flash-latest">gemini-flash-latest (Multimodal Vision Production)</option>
                       <option value="gemini-3.8-flash">gemini-3.8-flash (Extended Multimodal Reasoning)</option>
-                      <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Master High-Precision Rendering)</option>
                     </select>
                   </div>
 

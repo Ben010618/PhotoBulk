@@ -300,8 +300,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
               {jobStatus?.result && (
                 <div className="pt-2 border-t border-[#30363d]/50 flex items-center justify-between text-[11px] font-mono text-[#8b949e]">
-                  <span>Rendered: {jobStatus.result.total_images_rendered} files</span>
-                  <span>Archive: {(jobStatus.result.zip_size_bytes / (1024 * 1024)).toFixed(1)} MB</span>
+                <span>Rendered: {jobStatus.result.total_files || jobStatus.result.total_images_rendered || totalPhotos} files</span>
+                  <span>Archive: {(((jobStatus.result.file_size_bytes || jobStatus.result.zip_size_bytes || 0)) / (1024 * 1024)).toFixed(1)} MB</span>
                 </div>
               )}
             </div>
