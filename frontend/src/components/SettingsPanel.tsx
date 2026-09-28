@@ -38,6 +38,10 @@ interface SettingsPanelProps {
   setCatchlightBoost?: (v: number) => void;
   teethWhitening: number;
   setTeethWhitening: (v: number) => void;
+  skinBrightening: number;
+  setSkinBrightening: (v: number) => void;
+  keepMoles: boolean;
+  setKeepMoles: (keep: boolean) => void;
   looseHairCleanup?: boolean;
   setLooseHairCleanup?: (v: boolean) => void;
   looseHairStrength?: number;
@@ -102,6 +106,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   setCatchlightBoost,
   teethWhitening,
   setTeethWhitening,
+  skinBrightening,
+  setSkinBrightening,
+  keepMoles,
+  setKeepMoles,
   looseHairCleanup = true,
   setLooseHairCleanup,
   looseHairStrength = 30,
@@ -155,6 +163,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     const ec = preset.eye_catchlight ?? preset.catchlight_boost ?? 25;
     handleCatchlightChange(toPercent(ec));
     setTeethWhitening(toPercent(preset.teeth_whitening));
+    setSkinBrightening(toPercent(preset.skin_brightening ?? 0));
     if (preset.lip_color) setLipColor(preset.lip_color);
     setLipIntensity(toPercent(preset.lip_intensity));
     if (preset.loose_hair_cleanup !== undefined && setLooseHairStrength) {
@@ -438,12 +447,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               <button
                 key={b.id}
                 onClick={() => setBackdropType(b.id)}
+                title={b.description}
                 className={`p-2 rounded border text-left transition flex items-center gap-2 ${
                   backdropType === b.id ? 'border-[#58a6ff] bg-[#1f6feb]/10 text-[#f0f6fc]' : 'border-[#30363d] bg-[#0d1117]'
                 }`}
               >
                 <span className="w-3.5 h-3.5 rounded-full shrink-0 border border-black/40" style={{ backgroundColor: b.hex }} />
-                <span className="truncate text-[11px] font-medium">{b.name.split(' ')[0]}</span>
+                <span className="truncate text-[11px] font-medium">{b.name}</span>
               </button>
             ))}
           </div>
@@ -485,6 +495,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 onChange={(e) => setBlemishRemoval(Number(e.target.value))}
                 className="w-full h-1 bg-[#30363d] rounded-lg appearance-none cursor-pointer"
               />
+              <label className="flex items-center gap-1 mt-1 text-[10px] text-[#8b949e] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={keepMoles}
+                  onChange={(e) => setKeepMoles(e.target.checked)}
+                  className="rounded border-[#30363d] bg-[#161b22] text-[#1f6feb]"
+                />
+                <span>Keep moles &amp; beauty marks</span>
+              </label>
             </div>
 
             <div>
@@ -498,6 +517,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 max="100"
                 value={currentSpot}
                 onChange={(e) => handleSpotChange(Number(e.target.value))}
+                className="w-full h-1 bg-[#30363d] rounded-lg appearance-none cursor-pointer"
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between mb-1">
+                <span>Skin Brightening (Face &amp; Neck)</span>
+                <span className="text-[#58a6ff]">{skinBrightening}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={skinBrightening}
+                onChange={(e) => setSkinBrightening(Number(e.target.value))}
                 className="w-full h-1 bg-[#30363d] rounded-lg appearance-none cursor-pointer"
               />
             </div>

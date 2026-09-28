@@ -22,7 +22,8 @@ PAYMENTS_ENABLED = os.environ.get("PAYMENTS_ENABLED", "false").lower() in ("true
 
 # AI / Neural Model Preferences
 # u2net (0.44s on CPU) is default for laptop speed; birefnet-portrait is supported via env var
-REMBG_MODEL = os.environ.get("REMBG_MODEL", "u2net")
+# isnet-general-use keeps dark mortarboards against dark backdrops (u2net drops the board)
+REMBG_MODEL = os.environ.get("REMBG_MODEL", "isnet-general-use")
 BACKGROUND_REPLACEMENT_MODE = os.environ.get("BACKGROUND_REPLACEMENT_MODE", "replace")  # 'replace', 'clean', 'keep'
 
 # =========================================================================

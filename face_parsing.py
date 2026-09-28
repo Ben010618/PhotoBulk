@@ -91,6 +91,8 @@ def get_face_parsing_masks(
             lips_raw = np.isin(preds, [11, 12, 13]).astype(np.uint8) * 255
             hat_raw = (preds == 18).astype(np.uint8) * 255
             cloth_raw = (preds == 16).astype(np.uint8) * 255
+            mouth_raw = (preds == 11).astype(np.uint8) * 255
+            ears_raw = np.isin(preds, [7, 8]).astype(np.uint8) * 255
 
             # Fallback to landmarks if specific small facial features are missing
             if face_info and 'bbox' in face_info:
@@ -119,7 +121,9 @@ def get_face_parsing_masks(
                 "lips": lips_raw,
                 "neck": neck_raw,
                 "hat": hat_raw,
-                "cloth": cloth_raw
+                "cloth": cloth_raw,
+                "mouth": mouth_raw,
+                "ears": ears_raw
             }
         except Exception as e:
             logger.warning(f"BiSeNet parsing inference failed: {e}. Falling back to geometric masks.")

@@ -42,7 +42,9 @@ BEAUTY_PRESETS = {
         "rim_light_boost": 0.10,
         "highlight_recovery": 0.50,
         "lighting_temp": "neutral_5500k",
-        "fidelity_weight": 0.85
+        "fidelity_weight": 0.85,
+        "teeth_whitening": 0.30,
+        "skin_brightening": 0.0
     },
     "studio_glow": {
         "id": "studio_glow",
@@ -64,7 +66,9 @@ BEAUTY_PRESETS = {
         "rim_light_boost": 0.20,
         "highlight_recovery": 0.60,
         "lighting_temp": "neutral_5500k",
-        "fidelity_weight": 0.75
+        "fidelity_weight": 0.75,
+        "teeth_whitening": 0.45,
+        "skin_brightening": 0.25
     },
     "yearbook_classic": {
         "id": "yearbook_classic",
@@ -86,7 +90,9 @@ BEAUTY_PRESETS = {
         "rim_light_boost": 0.18,
         "highlight_recovery": 0.70,
         "lighting_temp": "neutral_5500k",
-        "fidelity_weight": 0.80
+        "fidelity_weight": 0.80,
+        "teeth_whitening": 0.50,
+        "skin_brightening": 0.15
     }
 }
 
@@ -119,152 +125,480 @@ def hex_to_bgr(hex_code: str) -> Tuple[int, int, int]:
     return (147, 112, 216)
 
 
+def _face_width(face_info: Optional[Dict[str, Any]], shape: Tuple[int, ...]) -> float:
+    """Face width in pixels; all retouch kernels scale with it so preview and full-res match."""
+    if face_info and "bbox" in face_info:
+        return float(max(int(face_info["bbox"][2]), 16))
+    return float(max(shape[:2]) * 0.25)
+
+
+def _odd(n: float, minimum: int = 3) -> int:
+    return max(minimum, int(round(n)) | 1)
+
+
+def _mask_roi(mask: np.ndarray, pad: int) -> Optional[Tuple[int, int, int, int]]:
+    ys, xs = np.where(mask > 0)
+    if len(ys) == 0:
+        return None
+    h, w = mask.shape[:2]
+    return (max(0, int(ys.min()) - pad), min(h, int(ys.max()) + pad + 1),
+            max(0, int(xs.min()) - pad), min(w, int(xs.max()) + pad + 1))
+
+
+def _soft_mask(mask: np.ndarray, blur_px: float) -> np.ndarray:
+    k = _odd(blur_px)
+    return (cv2.GaussianBlur(mask, (k, k), 0).astype(np.float32) / 255.0)[:, :, None]
+
+
+def _nostril_exclusion(shape: Tuple[int, ...], face_info: Optional[Dict[str, Any]]) -> np.ndarray:
+    """Mask over the nostrils, which are dark blobs a spot detector would otherwise heal."""
+    excl = np.zeros(shape[:2], dtype=np.uint8)
+    if face_info and face_info.get("nose") and "bbox" in face_info:
+        fw, fh = face_info["bbox"][2], face_info["bbox"][3]
+        nx, ny = face_info["nose"][:2]
+        cv2.ellipse(excl, (int(nx), int(ny + fh * 0.05)), (max(2, int(fw * 0.17)), max(2, int(fh * 0.08))), 0, 0, 360, 255, -1)
+    return excl
+
+
 def detect_and_heal_blemishes(
     img_bgr: np.ndarray,
     skin_mask: np.ndarray,
     blemish_strength: float = 0.60,
-    keep_moles: bool = True
+    keep_moles: bool = True,
+    face_info: Optional[Dict[str, Any]] = None
 ) -> np.ndarray:
     """
-    Detects small dark spots and acne inside the skin mask using Black-Hat transform on
-    the L* channel of CIELAB, filtered by size and contrast, and inpaints them.
-    Preserves authentic beauty marks and moles by filtering out high-contrast, compact spots.
+    Detects acne, dark spots and red pimples inside the skin mask and inpaints them.
+    Dark spots come from a Black-Hat transform on L*, red acne from a* raised above
+    its local median. Kernel sizes scale with face width. With keep_moles, very dark
+    compact round marks (beauty marks) are left alone.
     """
-    if blemish_strength <= 0.05 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
+    if blemish_strength <= 0.02 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
         return img_bgr
 
-    ys, xs = np.where(skin_mask > 0)
-    if len(ys) == 0:
+    fw = _face_width(face_info, img_bgr.shape)
+    roi = _mask_roi(skin_mask, int(fw * 0.06) + 2)
+    if roi is None:
         return img_bgr
-    y1, y2 = max(0, int(ys.min()) - 10), min(img_bgr.shape[0], int(ys.max()) + 10)
-    x1, x2 = max(0, int(xs.min()) - 10), min(img_bgr.shape[1], int(xs.max()) + 10)
-
+    y1, y2, x1, x2 = roi
     roi_img = img_bgr[y1:y2, x1:x2]
-    roi_mask = skin_mask[y1:y2, x1:x2]
+
+    # Detect only well inside the skin (avoids hairline / jaw shadows) and away from nostrils
+    erode_k = _odd(fw * 0.02)
+    detect_mask = cv2.erode(skin_mask, np.ones((erode_k, erode_k), np.uint8))
+    detect_mask = cv2.bitwise_and(detect_mask, cv2.bitwise_not(_nostril_exclusion(img_bgr.shape, face_info)))
+    roi_mask = detect_mask[y1:y2, x1:x2]
 
     lab = cv2.cvtColor(roi_img, cv2.COLOR_BGR2LAB)
-    L = lab[:, :, 0]
+    L, A = lab[:, :, 0], lab[:, :, 1]
 
-    # Black-hat transform isolates structures darker than surrounding skin
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    blackhat = cv2.morphologyEx(L, cv2.MORPH_BLACKHAT, kernel)
+    k = _odd(fw * 0.08)  # spots up to ~8% of face width
+    blackhat = cv2.morphologyEx(L, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    a_med = cv2.medianBlur(A, min(_odd(k * 2), 255))
+    redness = cv2.subtract(A, a_med)
 
-    thresh_val = int(max(6, 16 - blemish_strength * 8))
-    _, raw_spots = cv2.threshold(blackhat, thresh_val, 255, cv2.THRESH_BINARY)
-    raw_spots = cv2.bitwise_and(raw_spots, roi_mask)
+    # Typical acne / dark-spot contrast is 12-30 L* units; shading and creases are removed by the shape filter below
+    dark_thr = 28.0 - 16.0 * blemish_strength
+    red_thr = 16.0 - 8.0 * blemish_strength
+    max_area = np.pi * (fw * 0.045) ** 2
+    mole_min_area = np.pi * (fw * 0.008) ** 2
+    heal_mask = np.zeros(roi_mask.shape, dtype=np.uint8)
 
-    # Connected components analysis to filter by spot size (2 to 14 px radius) and keep moles
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(raw_spots, connectivity=8)
-    heal_mask = np.zeros_like(raw_spots)
+    def collect(response: np.ndarray, candidates: np.ndarray, depth: int, check_moles: bool) -> None:
+        """Keeps compact spot-sized components; a rejected component (a spot merged with a
+        smile line or nose shading) is re-thresholded at higher contrast to split the spot out."""
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidates, connectivity=8)
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < 2:
+                continue
+            bw, bh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+            comp = labels == i
+            compact = max(bw, bh) <= 3.0 * max(min(bw, bh), 1) and area >= 0.3 * bw * bh
+            if area <= max_area and compact:
+                if check_moles and keep_moles and area >= mole_min_area:
+                    roundish = 0.7 <= bw / max(bh, 1) <= 1.4
+                    if roundish and float(np.mean(response[comp])) > 50.0:
+                        continue
+                heal_mask[comp] = 255
+            elif depth < 3:
+                vals = response[comp]
+                sub_thr = float(vals.mean() + 0.5 * vals.std())
+                sub = (comp & (response > sub_thr)).astype(np.uint8) * 255
+                if cv2.countNonZero(sub) > 0:
+                    collect(response, sub, depth + 1, check_moles)
 
-    for i in range(1, num_labels):
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area < 3 or area > 220:
-            continue
+    opening = np.ones((2, 2), np.uint8)
+    dark = cv2.morphologyEx(cv2.bitwise_and(((blackhat > dark_thr).astype(np.uint8) * 255), roi_mask), cv2.MORPH_OPEN, opening)
+    collect(blackhat, dark, 0, check_moles=True)
+    red = cv2.morphologyEx(cv2.bitwise_and(((redness > red_thr).astype(np.uint8) * 255), roi_mask), cv2.MORPH_OPEN, opening)
+    collect(redness, red, 0, check_moles=False)
 
-        spot_comp = (labels == i)
-        spot_contrast = float(np.mean(blackhat[spot_comp]))
+    if cv2.countNonZero(heal_mask) == 0:
+        return img_bgr
 
-        # Keep moles: moles have very dark uniform pigmentation and sharp border gradient
-        is_mole = False
-        if keep_moles and area <= 80:
-            w_box = stats[i, cv2.CC_STAT_WIDTH]
-            h_box = stats[i, cv2.CC_STAT_HEIGHT]
-            aspect = float(w_box) / max(float(h_box), 1.0)
-            if 0.7 <= aspect <= 1.4 and spot_contrast > 28.0:
-                is_mole = True
-
-        if not is_mole:
-            heal_mask[spot_comp] = 255
-
-    if cv2.countNonZero(heal_mask) > 0:
-        heal_mask_dilated = cv2.dilate(heal_mask, np.ones((3, 3), np.uint8), iterations=1)
-        inpainted = cv2.inpaint(roi_img, heal_mask_dilated, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
-        alpha_heal = (cv2.GaussianBlur(heal_mask_dilated, (3, 3), 0).astype(np.float32) / 255.0 * blemish_strength)[:, :, None]
-        roi_healed = inpainted.astype(np.float32) * alpha_heal + roi_img.astype(np.float32) * (1.0 - alpha_heal)
-        out = img_bgr.copy()
-        out[y1:y2, x1:x2] = np.clip(roi_healed, 0, 255).astype(np.uint8)
-        return out
-
-    return img_bgr
+    dil_k = _odd(fw * 0.012)
+    heal_mask = cv2.dilate(heal_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil_k, dil_k)))
+    inpainted = cv2.inpaint(roi_img, heal_mask, inpaintRadius=max(3, int(fw * 0.015)), flags=cv2.INPAINT_TELEA)
+    alpha = float(np.clip(blemish_strength * 1.6, 0.0, 1.0))
+    alpha_heal = _soft_mask(heal_mask, fw * 0.01) * alpha
+    roi_healed = inpainted.astype(np.float32) * alpha_heal + roi_img.astype(np.float32) * (1.0 - alpha_heal)
+    out = img_bgr.copy()
+    out[y1:y2, x1:x2] = np.clip(roi_healed, 0, 255).astype(np.uint8)
+    return out
 
 
 def correct_spots_and_even_skin_tone(
     img_bgr: np.ndarray,
     skin_mask: np.ndarray,
     spot_correction: float = 0.50,
-    eyes_mask: Optional[np.ndarray] = None
+    eyes_mask: Optional[np.ndarray] = None,
+    face_info: Optional[Dict[str, Any]] = None
 ) -> np.ndarray:
     """
-    Evens out blotches, hyperpigmentation, redness, and under-eye dark circles
-    inside the skin mask without altering or bleaching the student's authentic Morena skin tone.
-    Simulates high-end liquid foundation and under-eye concealer application.
+    Evens out dark patches, hyperpigmentation and blotchy redness by pulling each skin
+    pixel toward the local median skin tone (like foundation), plus under-eye concealer.
+    Only darker-than-surrounding and redder-than-surrounding deviations are corrected,
+    so the student's overall skin tone is not bleached.
     """
-    if spot_correction <= 0.05 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
+    if spot_correction <= 0.02 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
         return img_bgr
 
-    h, w = img_bgr.shape[:2]
-    scale_ref = float(np.clip(max(h, w) / 1000.0, 0.4, 6.0))
-
-    ys, xs = np.where(skin_mask > 0)
-    if len(ys) == 0:
+    fw = _face_width(face_info, img_bgr.shape)
+    roi = _mask_roi(skin_mask, int(fw * 0.10) + 2)
+    if roi is None:
         return img_bgr
-    margin = int(15 * scale_ref)
-    y1, y2 = max(0, int(ys.min()) - margin), min(h, int(ys.max()) + margin)
-    x1, x2 = max(0, int(xs.min()) - margin), min(w, int(xs.max()) + margin)
-
+    y1, y2, x1, x2 = roi
     roi_bgr = img_bgr[y1:y2, x1:x2]
-    roi_mask = skin_mask[y1:y2, x1:x2]
-
     roi_lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-    # Resolution-adaptive local median skin luminance and chrominance
-    k_med = 2 * int(12 * scale_ref) + 1
-    max_k = (min(y2 - y1, x2 - x1) // 2) * 2 - 1
-    if max_k >= 3:
-        k_med = min(k_med, max_k)
-    else:
-        k_med = 3
+    # Clean-skin reference: a morphological closing fills dark patches smaller than ~15% of the
+    # face (spots, blotches) while following broad shading; an opening on a* removes red blotches.
+    # Computed at a fixed working scale and smoothed so the correction has no hard contours.
+    scale = min(1.0, 160.0 / fw)
+    small = cv2.resize(roi_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else roi_bgr
+    small_lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
+    kc = _odd(fw * scale * 0.15)
+    se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kc, kc))
+    ref_small = np.dstack([
+        cv2.morphologyEx(small_lab[:, :, 0], cv2.MORPH_CLOSE, se),
+        cv2.morphologyEx(small_lab[:, :, 1], cv2.MORPH_OPEN, se),
+        small_lab[:, :, 2],
+    ]).astype(np.float32)
+    ref_small = cv2.GaussianBlur(ref_small, (0, 0), kc / 3.0)
+    ref_lab = cv2.resize(ref_small, (roi_bgr.shape[1], roi_bgr.shape[0]), interpolation=cv2.INTER_LINEAR)
+    # Compare against a lightly blurred image so individual pores are not lifted away
+    cur_lab = cv2.GaussianBlur(roi_lab, (0, 0), max(0.8, fw * 0.006))
 
-    median_bgr = cv2.medianBlur(roi_bgr, k_med)
-    median_lab = cv2.cvtColor(median_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    skin_f = _soft_mask(skin_mask[y1:y2, x1:x2], fw * 0.03)[:, :, 0]
+    s = float(np.clip(spot_correction, 0.0, 1.0))
 
-    skin_f = (roi_mask.astype(np.float32) / 255.0)
+    dark_deficit = np.maximum(0.0, ref_lab[:, :, 0] - cur_lab[:, :, 0])
+    roi_lab[:, :, 0] += dark_deficit * (s * 0.85) * skin_f
+    red_excess = np.maximum(0.0, cur_lab[:, :, 1] - ref_lab[:, :, 1])
+    roi_lab[:, :, 1] -= red_excess * (s * 0.80) * skin_f
+    b_dev = cur_lab[:, :, 2] - ref_lab[:, :, 2]
+    roi_lab[:, :, 2] -= b_dev * (s * 0.40) * skin_f
+    median_lab = ref_lab
 
-    # 1. Foundation Tone Evening: gently reduce dark blotches towards local median
-    dark_deficit = np.maximum(0.0, median_lab[:, :, 0] - roi_lab[:, :, 0])
-    roi_lab[:, :, 0] += dark_deficit * (spot_correction * 0.42) * skin_f
-
-    # 2. Color-Correcting Primer: reduce blotchy redness (a* deviations) towards local median
-    a_diff = roi_lab[:, :, 1] - median_lab[:, :, 1]
-    red_blotch = np.maximum(0.0, a_diff)
-    roi_lab[:, :, 1] -= red_blotch * (spot_correction * 0.45) * skin_f
-
-    # 3. Under-Eye Concealer: lift under-eye hollows and correct bluish/purple shadow cast
-    if eyes_mask is not None and cv2.countNonZero(eyes_mask) > 0:
+    if eyes_mask is not None and cv2.countNonZero(eyes_mask[y1:y2, x1:x2]) > 0:
         roi_eyes = eyes_mask[y1:y2, x1:x2]
-        if cv2.countNonZero(roi_eyes) > 0:
-            e_ys, e_xs = np.where(roi_eyes > 0)
-            eye_h = int(e_ys.max() - e_ys.min())
-            ue_y1 = int(e_ys.max())
-            ue_y2 = min(roi_bgr.shape[0], ue_y1 + int(eye_h * 0.75))
-            ue_x1 = max(0, int(e_xs.min()) - int(10 * scale_ref))
-            ue_x2 = min(roi_bgr.shape[1], int(e_xs.max()) + int(10 * scale_ref))
-
-            ue_mask = np.zeros(roi_mask.shape, dtype=np.float32)
-            ue_mask[ue_y1:ue_y2, ue_x1:ue_x2] = (roi_mask[ue_y1:ue_y2, ue_x1:ue_x2] > 0).astype(np.float32)
-            k_blur = 2 * int(5 * scale_ref) + 1
-            ue_mask = cv2.GaussianBlur(ue_mask, (k_blur, k_blur), 0)
-
-            # Concealer: gently brighten dark eye hollows and harmonize coolness
-            ue_dark = np.maximum(0.0, median_lab[:, :, 0] - roi_lab[:, :, 0])
-            roi_lab[:, :, 0] += ue_dark * (spot_correction * 0.35) * ue_mask
-            b_diff = np.maximum(0.0, median_lab[:, :, 2] - roi_lab[:, :, 2])
-            roi_lab[:, :, 2] += b_diff * (spot_correction * 0.25) * ue_mask
+        e_ys, e_xs = np.where(roi_eyes > 0)
+        eye_h = max(2, int(e_ys.max() - e_ys.min()))
+        ue_y1 = int(e_ys.max())
+        ue_y2 = min(roi_bgr.shape[0], ue_y1 + int(eye_h * 0.9))
+        ue_mask = np.zeros(roi_lab.shape[:2], dtype=np.float32)
+        ue_mask[ue_y1:ue_y2, max(0, int(e_xs.min())):int(e_xs.max())] = 1.0
+        k_ue = _odd(fw * 0.05)
+        ue_mask = cv2.GaussianBlur(ue_mask, (k_ue, k_ue), 0) * skin_f
+        ue_dark = np.maximum(0.0, median_lab[:, :, 0] + 4.0 - roi_lab[:, :, 0])
+        roi_lab[:, :, 0] += ue_dark * (s * 0.5) * ue_mask
 
     out = img_bgr.copy()
     out[y1:y2, x1:x2] = cv2.cvtColor(np.clip(roi_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
     return out
+
+
+def smooth_skin_frequency_separation(
+    img_f: np.ndarray,
+    skin_mask: np.ndarray,
+    strength: float,
+    face_info: Optional[Dict[str, Any]] = None
+) -> np.ndarray:
+    """
+    Pore-preserving skin smoothing. An edge-preserving blur is computed at a fixed working
+    scale (face ~256 px wide) so it removes uneven texture and blotches the same way on a
+    preview and a 24 MP master; fine pore grain from the original is re-injected.
+    """
+    if strength <= 0.02 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
+        return img_f
+
+    fw = _face_width(face_info, img_f.shape)
+    roi = _mask_roi(skin_mask, int(fw * 0.05) + 2)
+    if roi is None:
+        return img_f
+    y1, y2, x1, x2 = roi
+    roi_f = img_f[y1:y2, x1:x2]
+    rh, rw = roi_f.shape[:2]
+
+    scale = min(1.0, 256.0 / fw)
+    roi_u8 = np.clip(roi_f, 0, 255).astype(np.uint8)
+    small = cv2.resize(roi_u8, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else roi_u8
+    sm = cv2.bilateralFilter(small, d=9, sigmaColor=26, sigmaSpace=7)
+    sm = cv2.bilateralFilter(sm, d=9, sigmaColor=18, sigmaSpace=7)
+    delta = sm.astype(np.float32) - small.astype(np.float32)
+    if scale < 1.0:
+        delta = cv2.resize(delta, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    smoothed = roi_f + delta
+
+    # Re-inject a portion of the finest grain so skin keeps real pores instead of looking plastic
+    grain_sigma = max(0.8, fw / 256.0)
+    grain = roi_f - cv2.GaussianBlur(roi_f, (0, 0), grain_sigma)
+    smoothed = smoothed + grain * (0.45 if scale < 1.0 else 0.35)
+
+    # Full slider = 85% blend so even maximum smoothing keeps some real skin structure
+    m = _soft_mask(skin_mask[y1:y2, x1:x2], fw * 0.03) * float(np.clip(strength, 0.0, 1.0)) * 0.85
+    out = img_f.copy()
+    out[y1:y2, x1:x2] = roi_f * (1.0 - m) + smoothed * m
+    return out
+
+
+def reduce_skin_shine(
+    img_f: np.ndarray,
+    skin_mask: np.ndarray,
+    strength: float,
+    face_info: Optional[Dict[str, Any]] = None
+) -> np.ndarray:
+    """Tames oily T-zone hot spots: pulls skin brighter than the typical skin tone back down and restores its colour."""
+    if strength <= 0.02 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
+        return img_f
+
+    fw = _face_width(face_info, img_f.shape)
+    roi = _mask_roi(skin_mask, 2)
+    if roi is None:
+        return img_f
+    y1, y2, x1, x2 = roi
+    roi_u8 = np.clip(img_f[y1:y2, x1:x2], 0, 255).astype(np.uint8)
+    lab = cv2.cvtColor(roi_u8, cv2.COLOR_BGR2LAB).astype(np.float32)
+    in_skin = skin_mask[y1:y2, x1:x2] > 127
+    if np.count_nonzero(in_skin) < 50:
+        return img_f
+
+    L = lab[:, :, 0]
+    ref_L = float(np.percentile(L[in_skin], 60))
+    excess = np.maximum(0.0, L - (ref_L + 10.0))
+    excess = cv2.GaussianBlur(excess, (0, 0), max(1.0, fw * 0.012))
+    s = float(np.clip(strength, 0.0, 1.0))
+    lab[:, :, 0] = L - excess * s * 0.80
+
+    # Shine is desaturated; blend chroma back toward the typical skin colour
+    w_col = np.clip(excess / 30.0, 0.0, 1.0) * s * 0.7
+    for c in (1, 2):
+        ref_c = float(np.median(lab[:, :, c][in_skin]))
+        lab[:, :, c] = lab[:, :, c] + (ref_c - lab[:, :, c]) * w_col
+
+    fixed = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)
+    m = _soft_mask(skin_mask[y1:y2, x1:x2], fw * 0.02)
+    out = img_f.copy()
+    out[y1:y2, x1:x2] = img_f[y1:y2, x1:x2] * (1.0 - m) + fixed * m
+    return out
+
+
+def brighten_skin(
+    img_f: np.ndarray,
+    skin_mask: np.ndarray,
+    strength: float,
+    face_info: Optional[Dict[str, Any]] = None
+) -> np.ndarray:
+    """
+    Skin brightening (fairer, luminous look) on face, neck and ears. Lifts luminance with a
+    curve that raises darker skin more than highlights, and slightly reduces yellowness.
+    Hue is kept, so the result is brighter skin rather than grey or chalky skin.
+    """
+    if strength <= 0.02 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
+        return img_f
+
+    fw = _face_width(face_info, img_f.shape)
+    roi = _mask_roi(skin_mask, int(fw * 0.04) + 2)
+    if roi is None:
+        return img_f
+    y1, y2, x1, x2 = roi
+    roi_u8 = np.clip(img_f[y1:y2, x1:x2], 0, 255).astype(np.uint8)
+    lab = cv2.cvtColor(roi_u8, cv2.COLOR_BGR2LAB).astype(np.float32)
+    s = float(np.clip(strength, 0.0, 1.0))
+    L = lab[:, :, 0]
+    lab[:, :, 0] = L + s * 34.0 * np.power(np.clip(1.0 - L / 255.0, 0.0, 1.0), 0.8)
+    lab[:, :, 2] = lab[:, :, 2] - (lab[:, :, 2] - 128.0) * s * 0.18
+    bright = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)
+
+    m = _soft_mask(skin_mask[y1:y2, x1:x2], fw * 0.05)
+    out = img_f.copy()
+    out[y1:y2, x1:x2] = img_f[y1:y2, x1:x2] * (1.0 - m) + bright * m
+    return out
+
+
+def _teeth_weight(
+    img_f: np.ndarray,
+    lips_mask: Optional[np.ndarray],
+    face_info: Optional[Dict[str, Any]] = None,
+    mouth_mask: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """Soft 0..1 map of visible teeth: bright, low-redness pixels inside the mouth region."""
+    h, w = img_f.shape[:2]
+    weight = np.zeros((h, w), dtype=np.float32)
+    region = mouth_mask if mouth_mask is not None and cv2.countNonZero(mouth_mask) > 0 else lips_mask
+    if (region is None or cv2.countNonZero(region) == 0) and face_info and face_info.get("right_mouth") and face_info.get("left_mouth"):
+        region = np.zeros((h, w), dtype=np.uint8)
+        (rx, ry), (lx, ly) = face_info["right_mouth"][:2], face_info["left_mouth"][:2]
+        fh = face_info["bbox"][3]
+        cv2.ellipse(region, (int((rx + lx) / 2), int((ry + ly) / 2 + fh * 0.02)), (max(2, int(abs(lx - rx) * 0.5)), max(2, int(fh * 0.07))), 0, 0, 360, 255, -1)
+    if region is None or cv2.countNonZero(region) == 0:
+        return weight
+
+    y1, y2, x1, x2 = _mask_roi(region, 2)
+    lab = cv2.cvtColor(np.clip(img_f[y1:y2, x1:x2], 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+    in_reg = region[y1:y2, x1:x2] > 127
+    if np.count_nonzero(in_reg) < 10:
+        return weight
+    L, A = lab[:, :, 0], lab[:, :, 1]
+    l_thr = max(110.0, float(np.percentile(L[in_reg], 45)))
+    w_map = np.clip((150.0 - A) / 10.0, 0.0, 1.0) * np.clip((L - l_thr) / 18.0, 0.0, 1.0) * in_reg
+    weight[y1:y2, x1:x2] = cv2.GaussianBlur(w_map.astype(np.float32), (3, 3), 0)
+    return weight
+
+
+def whiten_teeth(img_f: np.ndarray, teeth_weight: Optional[np.ndarray], strength: float) -> np.ndarray:
+    """Natural teeth whitening: removes yellow (b*) and lifts brightness only on detected teeth."""
+    if strength <= 0.02 or teeth_weight is None or not np.any(teeth_weight > 0.05):
+        return img_f
+    y1, y2, x1, x2 = _mask_roi((teeth_weight > 0.02).astype(np.uint8), 2)
+    lab = cv2.cvtColor(np.clip(img_f[y1:y2, x1:x2], 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+    s = float(np.clip(strength, 0.0, 1.0))
+    lab[:, :, 2] -= np.maximum(0.0, lab[:, :, 2] - 128.0) * s * 0.85
+    lab[:, :, 1] -= np.maximum(0.0, lab[:, :, 1] - 128.0) * s * 0.30
+    lab[:, :, 0] += s * 32.0 * np.clip(1.0 - lab[:, :, 0] / 255.0, 0.0, 1.0)
+    white = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)
+    m = teeth_weight[y1:y2, x1:x2][:, :, None]
+    out = img_f.copy()
+    out[y1:y2, x1:x2] = img_f[y1:y2, x1:x2] * (1.0 - m) + white * m
+    return out
+
+
+def iron_fabric_wrinkles(
+    img_f: np.ndarray,
+    cloth_mask: Optional[np.ndarray],
+    strength: float,
+    face_info: Optional[Dict[str, Any]] = None
+) -> np.ndarray:
+    """Digital toga ironing: flattens low-contrast wrinkle shading on the gown while keeping seams and fold edges."""
+    if strength <= 0.02 or cloth_mask is None or cv2.countNonZero(cloth_mask) == 0:
+        return img_f
+    fw = _face_width(face_info, img_f.shape)
+    y1, y2, x1, x2 = _mask_roi(cloth_mask, 2)
+    roi_f = img_f[y1:y2, x1:x2]
+    rh, rw = roi_f.shape[:2]
+    scale = min(1.0, 220.0 / fw)
+    roi_u8 = np.clip(roi_f, 0, 255).astype(np.uint8)
+    small = cv2.resize(roi_u8, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else roi_u8
+    sm = cv2.bilateralFilter(small, d=9, sigmaColor=16, sigmaSpace=9)
+    sm = cv2.bilateralFilter(sm, d=9, sigmaColor=14, sigmaSpace=9)
+    delta = sm.astype(np.float32) - small.astype(np.float32)
+    if scale < 1.0:
+        delta = cv2.resize(delta, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    inner = cv2.erode(cloth_mask[y1:y2, x1:x2], np.ones((3, 3), np.uint8), iterations=2)
+    m = _soft_mask(inner, fw * 0.02) * float(np.clip(strength, 0.0, 1.0)) * 0.9
+    out = img_f.copy()
+    out[y1:y2, x1:x2] = roi_f + delta * m
+    return out
+
+
+def cleanup_facial_stray_hairs(
+    img_bgr: np.ndarray,
+    skin_mask: np.ndarray,
+    strength: float = 0.50,
+    face_info: Optional[Dict[str, Any]] = None
+) -> np.ndarray:
+    """
+    Removes thin dark stray hair strands lying on the forehead, cheeks and neck.
+    Candidates are thin dark ridges (Black-Hat) that are clearly elongated; round spots
+    are left to the blemish tool. Kernel sizes scale with face width.
+    """
+    if strength <= 0.02 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
+        return img_bgr
+
+    fw = _face_width(face_info, img_bgr.shape)
+    roi = _mask_roi(skin_mask, int(fw * 0.03) + 2)
+    if roi is None:
+        return img_bgr
+    y1, y2, x1, x2 = roi
+    roi_img = img_bgr[y1:y2, x1:x2]
+    roi_mask = skin_mask[y1:y2, x1:x2]
+
+    gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
+    k = _odd(fw * 0.035)
+    bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    thr = 22.0 - 12.0 * strength
+    stray = ((bh > thr).astype(np.uint8) * 255)
+    stray = cv2.bitwise_and(stray, roi_mask)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(stray, connectivity=8)
+    final = np.zeros_like(stray)
+    min_len = fw * 0.05
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        length = float(max(stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]))
+        if area < 4 or length < min_len:
+            continue
+        thickness = area / max(length, 1.0)
+        if length / max(thickness, 0.5) >= 5.0:
+            final[labels == i] = 255
+
+    if cv2.countNonZero(final) == 0:
+        return img_bgr
+
+    inpaint_mask = cv2.dilate(final, np.ones((3, 3), np.uint8), iterations=1 + int(fw > 400))
+    inpainted = cv2.inpaint(roi_img, inpaint_mask, inpaintRadius=max(3, int(fw * 0.012)), flags=cv2.INPAINT_TELEA)
+    alpha = _soft_mask(inpaint_mask, 3) * float(np.clip(strength * 1.6, 0.0, 1.0))
+    roi_cleaned = inpainted.astype(np.float32) * alpha + roi_img.astype(np.float32) * (1.0 - alpha)
+    out = img_bgr.copy()
+    out[y1:y2, x1:x2] = np.clip(roi_cleaned, 0, 255).astype(np.uint8)
+    return out
+
+
+def cleanup_flyaway_hair_alpha(
+    alpha_mask: np.ndarray,
+    hair_mask: Optional[np.ndarray] = None,
+    strength: float = 0.50,
+    protect_mask: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """
+    Removes thin flyaway strands sticking out of the hair silhouette into the backdrop.
+    Works only in a band around the parsed hair region, and never touches protect_mask
+    (cap, tassel), so mortarboard corners and tassel threads are not eroded.
+    Without a hair mask it falls back to the top half of the frame.
+    """
+    if strength <= 0.02 or alpha_mask is None:
+        return alpha_mask
+
+    h, w = alpha_mask.shape[:2]
+    ref = max(h, w)
+    ksize = _odd(ref * 0.006 + strength * ref * 0.012)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+
+    if hair_mask is not None and cv2.countNonZero(hair_mask) > 0:
+        band = _odd(ref * 0.04)
+        hair_zone = cv2.dilate(hair_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (band, band)))
+    else:
+        hair_zone = np.zeros_like(alpha_mask)
+        hair_zone[:int(h * 0.55), :] = 255
+    if protect_mask is not None and cv2.countNonZero(protect_mask) > 0:
+        guard = _odd(ref * 0.01)
+        hair_zone = cv2.bitwise_and(hair_zone, cv2.bitwise_not(cv2.dilate(protect_mask, np.ones((guard, guard), np.uint8))))
+
+    smoothed_alpha = cv2.morphologyEx(alpha_mask, cv2.MORPH_OPEN, kernel)
+    weight = (cv2.GaussianBlur(hair_zone, (15, 15), 0).astype(np.float32) / 255.0) * float(np.clip(strength * 1.4, 0.0, 1.0))
+    res = alpha_mask.astype(np.float32) * (1.0 - weight) + smoothed_alpha.astype(np.float32) * weight
+    return np.clip(res, 0, 255).astype(np.uint8)
 
 
 def whiten_dark_spots_and_hyperpigmentation(img_bgr, skin_mask, whitening_strength=0.50):
@@ -365,82 +699,6 @@ def apply_ultra_makeup_skin_smoothing(
     return np.clip(out, 0, 255)
 
 
-def cleanup_facial_stray_hairs(
-    img_bgr: np.ndarray,
-    skin_mask: np.ndarray,
-    strength: float = 0.50
-) -> np.ndarray:
-    """
-    Detects thin dark stray hair strands across forehead and cheeks inside the skin mask
-    using directional line filters and inpaints them.
-    """
-    if strength <= 0.05 or skin_mask is None or cv2.countNonZero(skin_mask) == 0:
-        return img_bgr
-
-    ys, xs = np.where(skin_mask > 0)
-    if len(ys) == 0:
-        return img_bgr
-    y1, y2 = max(0, int(ys.min()) - 10), min(img_bgr.shape[0], int(ys.max()) + 10)
-    x1, x2 = max(0, int(xs.min()) - 10), min(img_bgr.shape[1], int(xs.max()) + 10)
-
-    roi_img = img_bgr[y1:y2, x1:x2]
-    roi_mask = skin_mask[y1:y2, x1:x2]
-
-    gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-    stray_mask = np.zeros_like(gray)
-    k_sizes = [(1, 9), (9, 1), (5, 5), (7, 3)]
-    for (kh, kw) in k_sizes:
-        k = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh))
-        bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k)
-        _, thresh = cv2.threshold(bh, 14, 255, cv2.THRESH_BINARY)
-        stray_mask = cv2.bitwise_or(stray_mask, thresh)
-
-    stray_mask = cv2.bitwise_and(stray_mask, roi_mask)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(stray_mask, connectivity=8)
-    final_stray = np.zeros_like(gray)
-    for i in range(1, num_labels):
-        area = stats[i, cv2.CC_STAT_AREA]
-        w_box = stats[i, cv2.CC_STAT_WIDTH]
-        h_box = stats[i, cv2.CC_STAT_HEIGHT]
-        if 4 <= area <= 220 and (w_box >= h_box * 1.6 or h_box >= w_box * 1.6):
-            final_stray[labels == i] = 255
-
-    if cv2.countNonZero(final_stray) > 0:
-        inpaint_mask = cv2.dilate(final_stray, np.ones((3, 3), np.uint8), iterations=1)
-        inpainted = cv2.inpaint(roi_img, inpaint_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
-        alpha = (final_stray.astype(np.float32) / 255.0 * strength)[:, :, None]
-        roi_cleaned = np.clip(inpainted.astype(np.float32) * alpha + roi_img.astype(np.float32) * (1.0 - alpha), 0, 255).astype(np.uint8)
-        out = img_bgr.copy()
-        out[y1:y2, x1:x2] = roi_cleaned
-        return out
-
-    return img_bgr
-
-
-def cleanup_flyaway_hair_alpha(
-    alpha_mask: np.ndarray,
-    hair_mask: Optional[np.ndarray] = None,
-    strength: float = 0.50
-) -> np.ndarray:
-    """Smooths outer hair silhouette and removes thin flyaway strands sticking out into backdrop."""
-    if strength <= 0.05 or alpha_mask is None:
-        return alpha_mask
-
-    ksize = int(max(3, round(strength * 5) | 1))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
-
-    h, w = alpha_mask.shape[:2]
-    hair_zone = np.zeros_like(alpha_mask)
-    hair_zone[:int(h * 0.55), :] = 255
-    if hair_mask is not None and cv2.countNonZero(hair_mask) > 0:
-        hair_zone = cv2.dilate(hair_mask, np.ones((15, 15), np.uint8), iterations=2)
-
-    smoothed_alpha = cv2.morphologyEx(alpha_mask, cv2.MORPH_OPEN, kernel)
-    weight = (cv2.GaussianBlur(hair_zone, (15, 15), 0).astype(np.float32) / 255.0) * strength
-    res = alpha_mask.astype(np.float32) * (1.0 - weight) + smoothed_alpha.astype(np.float32) * weight
-    return np.clip(res, 0, 255).astype(np.uint8)
-
-
 def enhance_eyes_refined(
     img_f: np.ndarray,
     eyes_mask: np.ndarray,
@@ -465,12 +723,15 @@ def enhance_eyes_refined(
 
     # Sclera / eye whites: very subtle lift (max 4%), no harsh desaturation
     sclera = (roi_mask > 50) & (v > 130)
-    roi_hsv[:, :, 2] = np.where(sclera, np.clip(v * 1.04, 0, 255), v)
+    roi_hsv[:, :, 2] = np.where(sclera, np.clip(v * (1.02 + 0.08 * catchlight_boost), 0, 255), v)
 
     # Specular catchlight: gentle glint enhancement, strictly inside pupil/iris
     if catchlight_boost > 0.05:
-        glint = (roi_mask > 50) & (v > 190)
-        roi_hsv[:, :, 2] = np.where(glint, np.clip(v + catchlight_boost * 18.0, 0, 255), v)
+        in_eye = roi_mask > 50
+        glint_thr = max(150.0, float(np.percentile(v[in_eye], 92))) if np.any(in_eye) else 190.0
+        glint = in_eye & (v > glint_thr)
+        v2 = roi_hsv[:, :, 2]
+        roi_hsv[:, :, 2] = np.where(glint, np.clip(v2 + catchlight_boost * 45.0, 0, 255), v2)
 
     enhanced = cv2.cvtColor(np.clip(roi_hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
 
@@ -639,7 +900,17 @@ def apply_studio_environment_lighting(
         rim_blur = (cv2.GaussianBlur(rim, (7, 7), 0).astype(np.float32) / 255.0)[:, :, None]
         out += rim_blur * (rim_light_boost * 35.0)
 
-    # 3. Gentle S-Curve for contrast
+    # 3. Key-light colour temperature (warm tungsten / cool daylight strobe) on the subject
+    temp_shift = {"warm_3200k": 1.0, "warm_4500k": 0.5, "cool_6500k": -1.0}.get(lighting_temp, 0.0)
+    if temp_shift:
+        if subject_mask is not None:
+            sm = subject_mask if subject_mask.ndim == 2 else cv2.cvtColor(subject_mask, cv2.COLOR_BGR2GRAY)
+            t_w = (sm.astype(np.float32) / 255.0)[:, :, None]
+        else:
+            t_w = 1.0
+        out = out + np.array([-9.0, 2.5, 9.0], dtype=np.float32) * temp_shift * t_w
+
+    # 4. Gentle S-Curve for contrast
     norm = out / 255.0
     s_curve = norm * norm * (3.0 - 2.0 * norm)
     out = (norm * 0.90 + s_curve * 0.10) * 255.0
@@ -673,7 +944,13 @@ def apply_beauty_preset_to_image(
 
     if face_info is None or 'bbox' not in face_info:
         # Fallback to general studio environment lighting without facial retouching
-        lit = apply_studio_environment_lighting(img_f, studio_light_intensity=0.15)
+        lit = apply_studio_environment_lighting(
+            img_f,
+            subject_mask=subject_mask,
+            lighting_temp=preset_dict.get("lighting_temp", "neutral_5500k"),
+            studio_light_intensity=float(preset_dict.get("studio_light_intensity", 0.15) or 0.0),
+            rim_light_boost=float(preset_dict.get("rim_light_boost", 0.0) or 0.0)
+        )
         # Apply Aftershoot-style color profile grading even when face landmarks are absent
         color_profile_id = preset_dict.get("color_profile", "clean_commercial")
         color_warmth = float(preset_dict.get("color_warmth", 0.0))
@@ -693,107 +970,101 @@ def apply_beauty_preset_to_image(
         masks = precomputed_masks
     else:
         masks = get_face_parsing_masks(img_bgr, face_info)
-    skin_mask = masks["skin"]
-    eyes_mask = masks["eyes"]
-    lips_mask = masks["lips"]
-    hat_mask = masks["hat"]
-    cloth_mask = masks["cloth"]
+    empty = np.zeros((h, w), dtype=np.uint8)
+    skin_mask = masks.get("skin", empty)
+    facial_skin = masks.get("facial_skin", skin_mask)
+    eyes_mask = masks.get("eyes", empty)
+    lips_mask = masks.get("lips", empty)
+    hat_mask = masks.get("hat", empty)
+    cloth_mask = masks.get("cloth", empty)
+    ears_mask = masks.get("ears")
 
-    # 2. Stray hair cleanup on face and forehead
-    cleanup_hair = preset_dict.get("cleanup_loose_hair", True)
-    hair_strength = float(preset_dict.get("loose_hair_cleanup", 0.40))
-    if cleanup_hair and hair_strength > 0.05:
-        img_bgr = cleanup_facial_stray_hairs(img_bgr, skin_mask, strength=hair_strength)
+    def amount(key: str, default: float) -> float:
+        try:
+            return float(np.clip(float(preset_dict.get(key, default) or 0.0), 0.0, 1.0))
+        except (TypeError, ValueError):
+            return default
 
-    # 3. Blemish & Acne Removal (with Keep Moles option)
-    blemish_cut = float(preset_dict.get("blemish_cut", 0.60))
-    keep_moles = bool(preset_dict.get("keep_moles", True))
-    healed_bgr = detect_and_heal_blemishes(img_bgr, skin_mask, blemish_strength=blemish_cut, keep_moles=keep_moles)
+    # 2. Loose / stray hairs lying on the face
+    if preset_dict.get("cleanup_loose_hair", True):
+        img_bgr = cleanup_facial_stray_hairs(img_bgr, skin_mask, strength=amount("loose_hair_cleanup", 0.40), face_info=face_info)
 
-    # 4. Spot Correction & Even Skin Tone (Redness/blotch balancing)
-    spot_correction = float(preset_dict.get("spot_correction", preset_dict.get("dark_spot_whitening", 0.40)))
-    healed_bgr = correct_spots_and_even_skin_tone(healed_bgr, skin_mask, spot_correction=spot_correction)
-    healed_f = healed_bgr.astype(np.float32)
+    # 3. Acne & blemish healing (optionally keeping beauty marks)
+    img_bgr = detect_and_heal_blemishes(
+        img_bgr, skin_mask,
+        blemish_strength=amount("blemish_cut", 0.60),
+        keep_moles=bool(preset_dict.get("keep_moles", True)),
+        face_info=face_info
+    )
 
-    # 5. Frequency Separation (Tone smoothing strictly inside skin mask with pore preservation)
-    skin_smoothing = float(preset_dict.get("skin_smoothing", 0.50))
-    skin_mask_f = (cv2.GaussianBlur(skin_mask, (15, 15), 0).astype(np.float32) / 255.0)[:, :, None]
+    # 4. Dark spot correction & even skin tone
+    spot = preset_dict.get("spot_correction", preset_dict.get("dark_spot_whitening", 0.40))
+    img_bgr = correct_spots_and_even_skin_tone(
+        img_bgr, skin_mask,
+        spot_correction=float(np.clip(float(spot or 0.0), 0.0, 1.0)),
+        eyes_mask=eyes_mask,
+        face_info=face_info
+    )
+    base = img_bgr.astype(np.float32)
 
-    low_freq = cv2.GaussianBlur(healed_f, (15, 15), 0)
-    high_freq = healed_f - low_freq + 128.0
+    # 5. Pore-preserving smoothing, 6. T-zone shine control
+    base = smooth_skin_frequency_separation(base, skin_mask, amount("skin_smoothing", 0.50), face_info)
+    base = reduce_skin_shine(base, facial_skin, amount("shine_reduction", 0.30), face_info)
 
-    low_u8 = np.clip(low_freq, 0, 255).astype(np.uint8)
-    smoothed_low = cv2.bilateralFilter(low_u8, d=11, sigmaColor=24, sigmaSpace=11).astype(np.float32)
+    # 7. Skin brightening (face, neck and ears)
+    bright_mask = skin_mask if ears_mask is None else cv2.bitwise_or(skin_mask, ears_mask)
+    base = brighten_skin(base, bright_mask, amount("skin_brightening", 0.0), face_info)
 
-    # T-Zone Specular De-Shine
-    shine_cut = float(preset_dict.get("shine_reduction", 0.30))
-    if shine_cut > 0.05:
-        gray_low = cv2.cvtColor(low_u8, cv2.COLOR_BGR2GRAY)
-        _, shine_pts = cv2.threshold(gray_low, 185, 255, cv2.THRESH_BINARY)
-        shine_pts = cv2.bitwise_and(shine_pts, skin_mask)
-        shine_blur = (cv2.GaussianBlur(shine_pts, (15, 15), 0).astype(np.float32) / 255.0)[:, :, None]
-        smoothed_low = smoothed_low * (1.0 - shine_blur * shine_cut * 0.25)
+    # 8. Teeth whitening, then lips (teeth excluded so lip saturation never yellows them)
+    teeth_w = _teeth_weight(base, lips_mask, face_info, masks.get("mouth"))
+    base = whiten_teeth(base, teeth_w, amount("teeth_whitening", 0.0))
+    lips_only = (lips_mask.astype(np.float32) * (1.0 - np.clip(teeth_w * 1.5, 0.0, 1.0))).astype(np.uint8)
+    base = enhance_lips_natural(
+        base, lips_only,
+        lip_enhancement=amount("lip_enhancement", 0.30),
+        lip_color_hex=preset_dict.get("lip_color"),
+        lip_intensity=amount("lip_intensity", 0.0)
+    )
 
-    blended_low = low_freq * (1.0 - skin_smoothing) + smoothed_low * skin_smoothing
-    skin_recombined = np.clip(blended_low + high_freq - 128.0, 0, 255)
-    base = skin_recombined * skin_mask_f + healed_f * (1.0 - skin_mask_f)
+    # 9. Eye clarity & catchlights
+    base = enhance_eyes_refined(
+        base, eyes_mask,
+        eye_sharpen=amount("eye_sharpen", 0.20),
+        catchlight_boost=float(np.clip(float(preset_dict.get("eye_catchlight", preset_dict.get("catchlight_boost", 0.20)) or 0.0), 0.0, 1.0))
+    )
 
-    # 6. Natural Lip Enhancement
-    lip_enhancement = float(preset_dict.get("lip_enhancement", 0.30))
-    lip_color = preset_dict.get("lip_color")
-    lip_intensity = float(preset_dict.get("lip_intensity", 0.0))
-    base = enhance_lips_natural(base, lips_mask, lip_enhancement=lip_enhancement, lip_color_hex=lip_color, lip_intensity=lip_intensity)
+    # 10. Soft highlight glow on skin
+    skin_mask_f = _soft_mask(skin_mask, _face_width(face_info, img_bgr.shape) * 0.03)
+    base = apply_subsurface_melanin_radiance(base, skin_mask_f, glow_intensity=amount("glow_intensity", 0.20))
 
-    # 7. Refined Eye Clarity & Catchlights (strictly inside eye mask, no white rings)
-    eye_sharpen = float(preset_dict.get("eye_sharpen", 0.20))
-    catchlight_boost = float(preset_dict.get("eye_catchlight", preset_dict.get("catchlight_boost", 0.20)))
-    base = enhance_eyes_refined(base, eyes_mask, eye_sharpen=eye_sharpen, catchlight_boost=catchlight_boost)
+    # 11. Toga ironing, then cap & gown clarity + highlight recovery
+    base = iron_fabric_wrinkles(base, cloth_mask, amount("iron_strength", 0.0), face_info)
+    base = enhance_clothing_and_regalia(base, hat_mask, cloth_mask, clarity_strength=0.35, highlight_recovery=amount("highlight_recovery", 0.60))
 
-    # 8. Soft Highlight Bloom (Glow on skin highlights only)
-    glow_intensity = float(preset_dict.get("glow_intensity", 0.20))
-    base = apply_subsurface_melanin_radiance(base, skin_mask_f, glow_intensity=glow_intensity)
-
-    # 9. Cap & Gown Clarity + Highlight Recovery
-    highlight_recovery = float(preset_dict.get("highlight_recovery", 0.60))
-    base = enhance_clothing_and_regalia(base, hat_mask, cloth_mask, clarity_strength=0.35, highlight_recovery=highlight_recovery)
-
-    # 10. Studio Environment Lighting (Soft key light + S-curve)
-    lighting_temp = preset_dict.get("lighting_temp", "neutral_5500k")
-    studio_light = float(preset_dict.get("studio_light_intensity", 0.18))
-    rim_boost = float(preset_dict.get("rim_light_boost", 0.15))
+    # 12. Studio Environment Lighting (key light, rim light, colour temperature, S-curve)
     effective_subject_mask = subject_mask
     if effective_subject_mask is None:
         effective_subject_mask = cv2.bitwise_or(skin_mask, cloth_mask)
         if "hair" in masks:
             effective_subject_mask = cv2.bitwise_or(effective_subject_mask, masks["hair"])
-        if "hat" in masks:
-            effective_subject_mask = cv2.bitwise_or(effective_subject_mask, hat_mask)
+        effective_subject_mask = cv2.bitwise_or(effective_subject_mask, hat_mask)
 
-    base = apply_studio_environment_lighting(
+    final = apply_studio_environment_lighting(
         base,
         subject_mask=effective_subject_mask,
-        lighting_temp=lighting_temp,
-        studio_light_intensity=studio_light,
-        rim_light_boost=rim_boost,
+        lighting_temp=preset_dict.get("lighting_temp", "neutral_5500k"),
+        studio_light_intensity=amount("studio_light_intensity", 0.18),
+        rim_light_boost=amount("rim_light_boost", 0.15),
         face_info=face_info
     )
 
-    # 11. Realism Fidelity Blending
-    fidelity_weight = float(preset_dict.get("fidelity_weight", 0.80))
-    final = base * (1.0 - fidelity_weight * 0.15) + img_f * (fidelity_weight * 0.15)
-
-    # 12. Aftershoot-Style AI Color Profiles & Tonal Grading
-    color_profile_id = preset_dict.get("color_profile", "clean_commercial")
-    color_warmth = float(preset_dict.get("color_warmth", 0.0))
-    color_contrast = float(preset_dict.get("color_contrast", 0.0))
-    color_vibrance = float(preset_dict.get("color_vibrance", 0.0))
-
+    # 13. Aftershoot-Style AI Color Profiles & Tonal Grading
     final = apply_aftershoot_color_grading(
         final,
-        profile_id=color_profile_id,
-        warmth=color_warmth,
-        contrast=color_contrast,
-        vibrance=color_vibrance,
+        profile_id=preset_dict.get("color_profile", "clean_commercial"),
+        warmth=float(preset_dict.get("color_warmth", 0.0) or 0.0),
+        contrast=float(preset_dict.get("color_contrast", 0.0) or 0.0),
+        vibrance=float(preset_dict.get("color_vibrance", 0.0) or 0.0),
         skin_mask_f=skin_mask_f
     )
 
@@ -1009,7 +1280,8 @@ def apply_aftershoot_color_grading(
 
         # Vibrance boosts low saturation pixels more than already saturated ones
         sat_norm = s / 255.0
-        vib_boost = (1.0 - sat_norm) * eff_vibrance * 70.0 * skin_protect_factor
+        neutral_guard = np.clip(sat_norm / 0.15, 0.0, 1.0)
+        vib_boost = (1.0 - sat_norm) * neutral_guard * eff_vibrance * 70.0 * skin_protect_factor
         hsv[:, :, 1] = np.clip(s + vib_boost, 0.0, 255.0)
 
         out = cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)

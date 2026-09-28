@@ -29,11 +29,12 @@ from fastapi import HTTPException
 import cv2
 import numpy as np
 
-from config import DATA_DIR, PROJECTS_DIR
+import config
+from config import PROJECTS_DIR
 from analyzer_engine import analyze_portrait
 from pipeline import get_subject_mask, crop_8r_aspect, crop_2x2_id
 from background_engine import generate_studio_backdrop, composite_subject_onto_backdrop, clean_original_backdrop
-from beautification_presets import apply_beauty_preset_to_image, apply_studio_environment_lighting
+from beautification_presets import apply_beauty_preset_to_image, cleanup_flyaway_hair_alpha, PRESET_ALIASES
 
 logger = logging.getLogger("kameraph.project_store")
 
@@ -221,11 +222,23 @@ class ProjectStore:
         alpha_path = photo_dir / "alpha.png"
         masks_path = photo_dir / "masks.npz"
 
-        # Check if already cached
-        if face_path.exists() and analysis_path.exists() and alpha_path.exists() and masks_path.exists():
+        # The subject matte is tied to the segmentation model that produced it; switching
+        # REMBG_MODEL (e.g. u2net -> isnet-general-use, which keeps mortarboards) recomputes it.
+        alpha_model_path = photo_dir / "alpha_model.txt"
+        current_model = getattr(config, "REMBG_MODEL", "u2net")
+        alpha_fresh = (
+            alpha_path.exists()
+            and alpha_model_path.exists()
+            and alpha_model_path.read_text(encoding="utf-8").strip() == current_model
+        )
+        analysis_cached = face_path.exists() and analysis_path.exists()
+
+        if analysis_cached and alpha_fresh:
             face_info = self.load_json(face_path)
             analysis = self.load_json(analysis_path)
-            return {"face_info": face_info, "analysis": analysis, "cached": True}
+            # Photos without a face never get masks.npz, so it must not be required for a cache hit
+            if face_info is None or masks_path.exists():
+                return {"face_info": face_info, "analysis": analysis, "cached": True}
 
         orig_path = photo_dir / "original.jpg"
         if not orig_path.exists():
@@ -236,23 +249,34 @@ class ProjectStore:
             raise ValueError(f"Could not read image at {orig_path}")
 
         # 1. AI Analysis & Face Geometry
-        analysis = analyze_portrait(img_bgr)
-        has_face = analysis.get("has_face", False)
-        face_info = None
-        if has_face and "face_box" in analysis:
-            fb = analysis["face_box"]
-            face_info = {
-                "bbox": [fb["x"], fb["y"], fb["width"], fb["height"]]
-            }
-            if analysis.get("landmarks"):
-                face_info.update(analysis["landmarks"])
+        if analysis_cached:
+            face_info = self.load_json(face_path)
+            analysis = self.load_json(analysis_path) or {}
+            has_face = face_info is not None
+        else:
+            analysis = analyze_portrait(img_bgr)
+            has_face = analysis.get("has_face", False)
+            face_info = None
+            if has_face and "face_box" in analysis:
+                fb = analysis["face_box"]
+                face_info = {
+                    "bbox": [fb["x"], fb["y"], fb["width"], fb["height"]]
+                }
+                if analysis.get("landmarks"):
+                    face_info.update(analysis["landmarks"])
 
-        self.save_json(face_path, face_info)
-        self.save_json(analysis_path, analysis)
+            self.save_json(face_path, face_info)
+            self.save_json(analysis_path, analysis)
 
         # 2. Subject Alpha Matte
-        alpha_mask = get_subject_mask(img_bgr, face_info)
-        cv2.imwrite(str(alpha_path), alpha_mask)
+        if alpha_fresh:
+            alpha_mask = cv2.imread(str(alpha_path), cv2.IMREAD_GRAYSCALE)
+        else:
+            alpha_mask = get_subject_mask(img_bgr, face_info)
+            cv2.imwrite(str(alpha_path), alpha_mask)
+            alpha_model_path.write_text(current_model, encoding="utf-8")
+            # The edge-decontaminated preview was derived from the old matte
+            (photo_dir / "preview_clean.jpg").unlink(missing_ok=True)
 
         # 3. Face Parsing Masks (cached to disk for instant interactive slider response)
         masks_path = photo_dir / "masks.npz"
@@ -288,6 +312,99 @@ class ProjectStore:
             self.save_json(meta_path, meta)
 
         return {"face_info": face_info, "analysis": analysis, "cached": False}
+
+    @staticmethod
+    def _apply_auto_corrections(img_bgr: np.ndarray, analysis: Dict[str, Any]) -> np.ndarray:
+        """Per-photo exposure and white-balance harmonization from the upload analysis."""
+        out = img_bgr
+        ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
+        if abs(ev) >= 0.10:
+            factor = float(np.clip(2.0 ** ev, 0.50, 2.80))
+            out = np.clip(out.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
+
+        wb_cast = analysis.get("white_balance_cast") or {}
+        delta_b = float(wb_cast.get("delta_b", 0.0))
+        if abs(delta_b) >= 2.0:
+            lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB).astype(np.float32)
+            b_shift = float(np.clip(-delta_b * 0.75, -25.0, 25.0))
+            lab[:, :, 2] = np.clip(lab[:, :, 2] + b_shift, 0.0, 255.0)
+            out = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        return out
+
+    @staticmethod
+    def _load_masks(masks_path: Path, h: int, w: int, photo_id: str) -> Optional[Dict[str, np.ndarray]]:
+        if not masks_path.exists():
+            return None
+        try:
+            npz = np.load(str(masks_path))
+            masks = {}
+            for k in npz.files:
+                m = npz[k]
+                masks[k] = m if m.shape[:2] == (h, w) else cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+            return masks
+        except Exception as e:
+            logger.warning(f"Notice loading masks.npz for {photo_id}: {e}")
+            return None
+
+    def _render_look(
+        self,
+        subject_bgr: np.ndarray,
+        original_bgr: np.ndarray,
+        alpha: np.ndarray,
+        face_info: Optional[Dict[str, Any]],
+        masks: Optional[Dict[str, np.ndarray]],
+        active_settings: Dict[str, Any],
+        analysis: Dict[str, Any],
+        decontaminate: bool
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Shared render used by both the interactive preview and the full-resolution export.
+        Exposure, white balance, retouching, lighting and colour grading run on the subject
+        photo first; the backdrop is composited last so the chosen backdrop colour is never
+        re-tinted per photo and stays identical across a batch.
+        Returns (rendered_bgr, refined_alpha).
+        """
+        h, w = subject_bgr.shape[:2]
+        bg_replacement = active_settings.get("bg_replacement_enabled", True)
+        backdrop_mode = active_settings.get("backdrop_mode", "replace" if bg_replacement else "keep")
+        backdrop_type = active_settings.get("backdrop_type", "classic_blue")
+
+        base = original_bgr if backdrop_mode == "keep" else subject_bgr
+        base = self._apply_auto_corrections(base, analysis)
+
+        # Flyaway hairs against the backdrop are removed by refining the matte around the hair,
+        # with the cap and tassel protected.
+        hair_mask = masks.get("hair") if masks else None
+        if (
+            backdrop_mode != "keep"
+            and active_settings.get("cleanup_loose_hair", True)
+            and hair_mask is not None
+            and cv2.countNonZero(hair_mask) > 0
+        ):
+            alpha = cleanup_flyaway_hair_alpha(
+                alpha,
+                hair_mask=hair_mask,
+                strength=float(active_settings.get("loose_hair_cleanup", 0.40) or 0.0),
+                protect_mask=masks.get("hat"),
+            )
+
+        preset_id = active_settings.get("preset_id") or active_settings.get("beauty_preset") or "natural"
+        preset_id = PRESET_ALIASES.get(preset_id, preset_id)
+        enhanced = apply_beauty_preset_to_image(
+            base,
+            face_info=face_info,
+            preset_id=preset_id,
+            custom_adjustments=active_settings,
+            precomputed_masks=masks,
+            subject_mask=alpha,
+        )
+
+        if backdrop_mode == "replace":
+            backdrop = generate_studio_backdrop(w, h, backdrop_type=backdrop_type, face_info=face_info)
+            enhanced = composite_subject_onto_backdrop(enhanced, alpha, backdrop, decontaminate=decontaminate)
+        elif backdrop_mode == "clean":
+            enhanced = clean_original_backdrop(enhanced, alpha)
+        return enhanced, alpha
 
     def render_preview_fast(
         self,
@@ -351,97 +468,24 @@ class ProjectStore:
                 else:
                     preview_face_info[k] = v
 
-        # 1. Backdrop Compositing
-        bg_replacement = active_settings.get("bg_replacement_enabled", True)
-        backdrop_mode = active_settings.get("backdrop_mode", "replace" if bg_replacement else "keep")
-        backdrop_type = active_settings.get("backdrop_type", "classic_blue")
-
-        # Check for precomputed clean preview to skip heavy edge decontamination during interactive slider updates
+        # Edge-decontaminated copy (precomputed) avoids heavy decontamination per slider move
         clean_preview_p = photo_dir / "preview_clean.jpg"
-        if clean_preview_p.exists():
-            clean_subj_bgr = cv2.imread(str(clean_preview_p))
-            decontam_needed = False
-        else:
+        clean_subj_bgr = cv2.imread(str(clean_preview_p)) if clean_preview_p.exists() else None
+        decontam_needed = clean_subj_bgr is None or clean_subj_bgr.shape[:2] != (ph, pw)
+        if decontam_needed:
             clean_subj_bgr = preview_bgr
-            decontam_needed = True
 
-        if backdrop_mode == "clean":
-            subject_isolated = clean_original_backdrop(clean_subj_bgr, alpha_preview)
-        elif backdrop_mode == "replace":
-            backdrop = generate_studio_backdrop(pw, ph, backdrop_type=backdrop_type, face_info=preview_face_info)
-            subject_isolated = composite_subject_onto_backdrop(clean_subj_bgr, alpha_preview, backdrop, decontaminate=decontam_needed)
-        else:
-            subject_isolated = preview_bgr.copy()
-
-        # 2. Smart Auto-Corrections (Batch Harmonization: Exposure & White Balance)
-        ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
-        if abs(ev) >= 0.10:
-            factor = float(np.clip(2.0 ** ev, 0.50, 2.80))
-            subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
-
-        # Auto White-Balance Harmonization
-        wb_cast = analysis.get("white_balance_cast") or {}
-        delta_b = float(wb_cast.get("delta_b", 0.0))
-        if abs(delta_b) >= 2.0:
-            lab = cv2.cvtColor(subject_isolated, cv2.COLOR_BGR2LAB).astype(np.float32)
-            b_shift = float(np.clip(-delta_b * 0.75, -25.0, 25.0))
-            lab[:, :, 2] = np.clip(lab[:, :, 2] + b_shift, 0.0, 255.0)
-            subject_isolated = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
-
-        # Load cached face parsing masks (scaled to preview)
-        masks_path = photo_dir / "masks.npz"
-        preview_masks = None
-        if masks_path.exists():
-            try:
-                npz = np.load(str(masks_path))
-                preview_masks = {}
-                for k in npz.files:
-                    m = npz[k]
-                    if m.shape[:2] != (ph, pw):
-                        preview_masks[k] = cv2.resize(m, (pw, ph), interpolation=cv2.INTER_NEAREST)
-                    else:
-                        preview_masks[k] = m
-            except Exception as e:
-                logger.warning(f"Notice loading masks.npz for {photo_id}: {e}")
-
-        # 3. Fast Beauty & Lighting
-        preset_id = active_settings.get("preset_id") or active_settings.get("beauty_preset") or "natural"
-        from beautification_presets import PRESET_ALIASES, apply_aftershoot_color_grading
-        preset_id = PRESET_ALIASES.get(preset_id, preset_id)
-
-        if preview_face_info is not None:
-            enhanced_preview = apply_beauty_preset_to_image(
-                subject_isolated,
-                face_info=preview_face_info,
-                preset_id=preset_id,
-                custom_adjustments=active_settings,
-                precomputed_masks=preview_masks,
-                subject_mask=alpha_preview
-            )
-        else:
-            # Skip facial steps, execute studio lighting and color profile grading
-            lighting_temp = active_settings.get("lighting_temp", "neutral_5500k")
-            studio_light_intensity = float(active_settings.get("studio_light_intensity", 0.20))
-            rim_light_boost = float(active_settings.get("rim_light_boost", 0.20))
-            lit_bgr = apply_studio_environment_lighting(
-                subject_isolated.astype(np.float32),
-                alpha_preview,
-                lighting_temp=lighting_temp,
-                studio_light_intensity=studio_light_intensity,
-                rim_light_boost=rim_light_boost
-            )
-            color_profile_id = active_settings.get("color_profile", "clean_commercial")
-            color_warmth = float(active_settings.get("color_warmth", 0.0))
-            color_contrast = float(active_settings.get("color_contrast", 0.0))
-            color_vibrance = float(active_settings.get("color_vibrance", 0.0))
-            graded = apply_aftershoot_color_grading(
-                lit_bgr,
-                profile_id=color_profile_id,
-                warmth=color_warmth,
-                contrast=color_contrast,
-                vibrance=color_vibrance
-            )
-            enhanced_preview = np.clip(graded, 0, 255).astype(np.uint8)
+        preview_masks = self._load_masks(photo_dir / "masks.npz", ph, pw, photo_id)
+        enhanced_preview, alpha_preview = self._render_look(
+            clean_subj_bgr,
+            preview_bgr,
+            alpha_preview,
+            preview_face_info,
+            preview_masks,
+            active_settings,
+            analysis,
+            decontaminate=decontam_needed,
+        )
 
         # 4. Save enhanced preview and crops to disk for immediate serving
         enhanced_path = photo_dir / "preview_enhanced.jpg"
@@ -450,7 +494,7 @@ class ProjectStore:
         try:
             crop_8r = crop_8r_aspect(enhanced_preview)
             cv2.imwrite(str(photo_dir / "preview_8R.jpg"), crop_8r, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-            crop_2x2 = crop_2x2_id(enhanced_preview, preview_face_info)
+            crop_2x2 = crop_2x2_id(enhanced_preview, preview_face_info, mask=alpha_preview)
             cv2.imwrite(str(photo_dir / "preview_2x2.jpg"), crop_2x2, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
         except Exception as crop_err:
             logger.warning(f"Preview crop precomputation notice for {photo_id}: {crop_err}")
@@ -503,91 +547,21 @@ class ProjectStore:
         saved_settings = self.load_json(photo_dir / "settings.json") or {}
         active_settings = {**saved_settings, **(custom_settings or {})}
 
-        # 1. Studio Backdrop Compositing
-        bg_replacement = active_settings.get("bg_replacement_enabled", True)
-        backdrop_mode = active_settings.get("backdrop_mode", "replace" if bg_replacement else "keep")
-        backdrop_type = active_settings.get("backdrop_type", "classic_blue")
-
-        if backdrop_mode == "clean":
-            subject_isolated = clean_original_backdrop(img_bgr, alpha_mask)
-        elif backdrop_mode == "replace":
-            backdrop = generate_studio_backdrop(w, h, backdrop_type=backdrop_type, face_info=face_info)
-            subject_isolated = composite_subject_onto_backdrop(img_bgr, alpha_mask, backdrop)
-        else:
-            subject_isolated = img_bgr.copy()
-
-        # 2. Smart Auto-Corrections (Exposure & Tone & WB Harmonization)
-        ev = float(analysis.get("auto_corrections", {}).get("exposure_compensation_ev", 0.0))
-        if abs(ev) >= 0.10:
-            factor = float(np.clip(2.0 ** ev, 0.50, 2.80))
-            subject_isolated = np.clip(subject_isolated.astype(np.float32) * factor, 0.0, 255.0).astype(np.uint8)
-
-        # Auto White-Balance Harmonization
-        wb_cast = analysis.get("white_balance_cast") or {}
-        delta_b = float(wb_cast.get("delta_b", 0.0))
-        if abs(delta_b) >= 2.0:
-            lab = cv2.cvtColor(subject_isolated, cv2.COLOR_BGR2LAB).astype(np.float32)
-            b_shift = float(np.clip(-delta_b * 0.75, -25.0, 25.0))
-            lab[:, :, 2] = np.clip(lab[:, :, 2] + b_shift, 0.0, 255.0)
-            subject_isolated = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
-
-        # Load cached face parsing masks (scaled to full resolution)
-        masks_path = photo_dir / "masks.npz"
-        full_masks = None
-        if masks_path.exists():
-            try:
-                npz = np.load(str(masks_path))
-                full_masks = {}
-                for k in npz.files:
-                    m = npz[k]
-                    if m.shape[:2] != (h, w):
-                        full_masks[k] = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
-                    else:
-                        full_masks[k] = m
-            except Exception as e:
-                logger.warning(f"Notice loading full masks.npz for {photo_id}: {e}")
-
-        # 3. Beauty & Studio Lighting
-        preset_id = active_settings.get("preset_id") or active_settings.get("beauty_preset") or "natural"
-        from beautification_presets import PRESET_ALIASES, apply_aftershoot_color_grading
-        preset_id = PRESET_ALIASES.get(preset_id, preset_id)
-
-        if face_info is not None:
-            enhanced_bgr = apply_beauty_preset_to_image(
-                subject_isolated,
-                face_info=face_info,
-                preset_id=preset_id,
-                custom_adjustments=active_settings,
-                precomputed_masks=full_masks,
-                subject_mask=alpha_mask
-            )
-        else:
-            lighting_temp = active_settings.get("lighting_temp", "neutral_5500k")
-            studio_light_intensity = float(active_settings.get("studio_light_intensity", 0.20))
-            rim_light_boost = float(active_settings.get("rim_light_boost", 0.20))
-            lit_bgr = apply_studio_environment_lighting(
-                subject_isolated.astype(np.float32),
-                alpha_mask,
-                lighting_temp=lighting_temp,
-                studio_light_intensity=studio_light_intensity,
-                rim_light_boost=rim_light_boost
-            )
-            color_profile_id = active_settings.get("color_profile", "clean_commercial")
-            color_warmth = float(active_settings.get("color_warmth", 0.0))
-            color_contrast = float(active_settings.get("color_contrast", 0.0))
-            color_vibrance = float(active_settings.get("color_vibrance", 0.0))
-            graded = apply_aftershoot_color_grading(
-                lit_bgr,
-                profile_id=color_profile_id,
-                warmth=color_warmth,
-                contrast=color_contrast,
-                vibrance=color_vibrance
-            )
-            enhanced_bgr = np.clip(graded, 0, 255).astype(np.uint8)
+        full_masks = self._load_masks(photo_dir / "masks.npz", h, w, photo_id)
+        enhanced_bgr, alpha_mask = self._render_look(
+            img_bgr,
+            img_bgr,
+            alpha_mask,
+            face_info,
+            full_masks,
+            active_settings,
+            analysis,
+            decontaminate=True,
+        )
 
         # 3. Print Crops
         crop_8r = crop_8r_aspect(enhanced_bgr)
-        crop_2x2 = crop_2x2_id(enhanced_bgr, face_info)
+        crop_2x2 = crop_2x2_id(enhanced_bgr, face_info, mask=alpha_mask)
 
         # 4. Save Renders with sRGB standard JPEG Quality 95
         master_path = photo_dir / "render_master.jpg"

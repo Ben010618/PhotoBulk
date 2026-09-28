@@ -114,6 +114,7 @@ export interface BeautyPreset {
   eye_catchlight?: number;
   catchlight_boost?: number;
   teeth_whitening: number;
+  skin_brightening?: number;
   loose_hair_cleanup?: number;
   cleanup_loose_hair?: boolean;
 }

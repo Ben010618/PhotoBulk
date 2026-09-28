@@ -80,6 +80,10 @@ export default function App() {
     setCatchlightBoost,
     teethWhitening,
     setTeethWhitening,
+    skinBrightening,
+    setSkinBrightening,
+    keepMoles,
+    setKeepMoles,
     looseHairCleanup,
     setLooseHairCleanup,
     looseHairStrength,
@@ -133,33 +137,39 @@ export default function App() {
   const backdrops: BackdropPreset[] = [
     {
       id: 'classic_blue',
-      name: 'Classic Graduation Blue Gradient',
+      name: 'Classic Blue',
       description: 'Rich cobalt and royal blue radial gradient with soft strobe key-light falloff.',
       hex: '#1d457a',
     },
     {
       id: 'deep_navy',
-      name: 'Deep Academic Navy',
+      name: 'Deep Navy',
       description: 'Formal deep navy muslin with subtle strobe vignette behind the head.',
       hex: '#101e33',
     },
     {
       id: 'neutral_grey',
-      name: 'Neutral Studio Grey',
+      name: 'Neutral Grey',
       description: 'Clean contemporary editorial studio grey with smooth light center.',
       hex: '#5e656d',
     },
     {
       id: 'studio_white',
-      name: 'Studio Pure White (Formal / Passport)',
+      name: 'Studio White',
       description: 'High-key clean seamless white studio background with gentle corner falloff.',
       hex: '#f5f6f8',
     },
     {
       id: 'warm_brown',
-      name: 'Warm Studio Brown Canvas',
+      name: 'Warm Brown',
       description: 'Traditional warm mocha/chestnut painted portrait canvas with soft strobe backlight.',
       hex: '#3d2a1d',
+    },
+    {
+      id: 'prc_red',
+      name: 'PRC Red',
+      description: 'Solid red backdrop used for PRC and some school ID requirements.',
+      hex: '#9b1b24',
     },
   ];
 
@@ -180,6 +190,7 @@ export default function App() {
       catchlight_boost: 25,
       teeth_whitening: 30,
       loose_hair_cleanup: 30,
+      skin_brightening: 0,
       cleanup_loose_hair: true,
     },
     {
@@ -197,6 +208,7 @@ export default function App() {
       catchlight_boost: 35,
       teeth_whitening: 45,
       loose_hair_cleanup: 50,
+      skin_brightening: 25,
       cleanup_loose_hair: true,
     },
     {
@@ -214,6 +226,7 @@ export default function App() {
       catchlight_boost: 30,
       teeth_whitening: 50,
       loose_hair_cleanup: 40,
+      skin_brightening: 15,
       cleanup_loose_hair: true,
     },
   ];
@@ -329,8 +342,8 @@ export default function App() {
       }));
 
       setPhotos(items);
-      if (items.length > 0 && !activePhotoId) {
-        setActivePhotoId(items[0].id);
+      if (items.length > 0 && !items.some((p) => p.id === useEditorStore.getState().activePhotoId)) {
+        selectPhoto(items[0].id, items);
       }
       return items;
     } catch (err: unknown) {
@@ -349,40 +362,85 @@ export default function App() {
 
   const activePhoto = photos.find((p) => p.id === activePhotoId) || photos[0] || null;
 
+  // Current editor controls as backend settings (sliders are 0-100, backend expects 0-1)
+  const activeSettings = {
+    bg_replacement_enabled: bgReplacementEnabled,
+    backdrop_type: backdropType,
+    regalia_profile: regaliaProfile,
+    preset_id: beautyPreset,
+    beauty_preset: beautyPreset,
+    skin_smoothing: skinSmoothing / 100,
+    blemish_cut: blemishRemoval / 100,
+    keep_moles: keepMoles,
+    spot_correction: (spotCorrection ?? darkSpotWhitening) / 100,
+    dark_spot_whitening: (spotCorrection ?? darkSpotWhitening) / 100,
+    skin_brightening: skinBrightening / 100,
+    shine_reduction: shineCut / 100,
+    lip_color: lipColor,
+    lip_intensity: lipIntensity / 100,
+    glow_intensity: glowIntensity / 100,
+    eye_catchlight: (eyeCatchlight ?? catchlightBoost) / 100,
+    teeth_whitening: teethWhitening / 100,
+    loose_hair_cleanup: (looseHairStrength ?? 30) / 100,
+    cleanup_loose_hair: looseHairCleanup,
+    lighting_temp: lightingTemp,
+    studio_light_intensity: studioLightIntensity / 100,
+    rim_light_boost: rimLightBoost / 100,
+    iron_strength: togaIron / 100,
+    color_profile: colorProfile,
+    color_warmth: colorWarmth,
+    color_contrast: colorContrast,
+    color_vibrance: colorVibrance,
+  };
+  const activeSettingsSig = JSON.stringify(activeSettings);
+
+  // Load a photo's saved look into the controls in the same update that selects it,
+  // so the live preview treats it as the baseline instead of a user edit.
+  function selectPhoto(id: string, list: PhotoItem[] = photos) {
+    const saved = list.find((p) => p.id === id)?.settings;
+    if (saved && Object.keys(saved).length > 0) {
+      const pct = (v: unknown) => (typeof v === 'number' ? Math.round(v * 100) : undefined);
+      const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+      const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
+      const num = (v: unknown) => (typeof v === 'number' ? v : undefined);
+      const put = <T,>(v: T | undefined, setter: (x: T) => void) => {
+        if (v !== undefined) setter(v);
+      };
+      put(bool(saved.bg_replacement_enabled), setBgReplacementEnabled);
+      put(str(saved.backdrop_type), setBackdropType);
+      put(str(saved.regalia_profile), setRegaliaProfile);
+      put(str(saved.preset_id ?? saved.beauty_preset), setBeautyPreset);
+      put(pct(saved.skin_smoothing), setSkinSmoothing);
+      put(pct(saved.blemish_cut), setBlemishRemoval);
+      put(bool(saved.keep_moles), setKeepMoles);
+      put(pct(saved.spot_correction ?? saved.dark_spot_whitening), setSpotCorrection);
+      put(pct(saved.skin_brightening), setSkinBrightening);
+      put(pct(saved.shine_reduction), setShineCut);
+      put(str(saved.lip_color), setLipColor);
+      put(pct(saved.lip_intensity), setLipIntensity);
+      put(pct(saved.glow_intensity), setGlowIntensity);
+      put(pct(saved.eye_catchlight ?? saved.catchlight_boost), setEyeCatchlight);
+      put(pct(saved.teeth_whitening), setTeethWhitening);
+      put(pct(saved.loose_hair_cleanup), setLooseHairStrength);
+      put(bool(saved.cleanup_loose_hair), setLooseHairCleanup);
+      put(str(saved.lighting_temp) as typeof lightingTemp | undefined, setLightingTemp);
+      put(pct(saved.studio_light_intensity), setStudioLightIntensity);
+      put(pct(saved.rim_light_boost), setRimLightBoost);
+      put(pct(saved.iron_strength), setTogaIron);
+      put(str(saved.color_profile), setColorProfile);
+      put(num(saved.color_warmth), setColorWarmth);
+      put(num(saved.color_contrast), setColorContrast);
+      put(num(saved.color_vibrance), setColorVibrance);
+    }
+    setActivePhotoId(id);
+  }
+
   // 1. Process Active Photo Tuning (<1s fast preview update on disk)
-  const handleProcessActive = async () => {
+  const handleProcessActive = async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!activePhoto) return;
     setIsProcessing(true);
 
     try {
-      const activeSettings = {
-        bg_replacement_enabled: bgReplacementEnabled,
-        backdrop_type: backdropType,
-        regalia_profile: regaliaProfile,
-        preset_id: beautyPreset,
-        beauty_preset: beautyPreset,
-        skin_smoothing: skinSmoothing / 100,
-        blemish_cut: blemishRemoval / 100,
-        spot_correction: (spotCorrection ?? darkSpotWhitening) / 100,
-        dark_spot_whitening: (spotCorrection ?? darkSpotWhitening) / 100,
-        shine_reduction: shineCut / 100,
-        lip_color: lipColor,
-        lip_intensity: lipIntensity / 100,
-        glow_intensity: glowIntensity / 100,
-        eye_catchlight: (eyeCatchlight ?? catchlightBoost) / 100,
-        teeth_whitening: teethWhitening / 100,
-        loose_hair_cleanup: (looseHairStrength ?? 30) / 100,
-        cleanup_loose_hair: looseHairCleanup,
-        lighting_temp: lightingTemp,
-        studio_light_intensity: studioLightIntensity / 100,
-        rim_light_boost: rimLightBoost / 100,
-        iron_strength: togaIron / 100,
-        color_profile: colorProfile,
-        color_warmth: colorWarmth,
-        color_contrast: colorContrast,
-        color_vibrance: colorVibrance,
-      };
-
       const res = await api.updatePhotoSettings(
         currentProjectId,
         activePhoto.id,
@@ -407,12 +465,13 @@ export default function App() {
                 crop2x2Url: cacheBust2x2,
                 has_user_override: true,
                 status: 'done',
+                settings: res.settings,
               }
             : p
         )
       );
 
-      addToast('success', `Adjustments saved in ${res.render_latency_ms || 250} ms.`);
+      if (!silent) addToast('success', `Adjustments saved in ${res.render_latency_ms || 250} ms.`);
     } catch (err: unknown) {
       console.error('[App] Process photo error:', err);
       const msg = err instanceof Error ? err.message : 'Error applying settings';
@@ -421,6 +480,44 @@ export default function App() {
       setIsProcessing(false);
     }
   };
+
+  // Live preview: re-render ~350 ms after the last control change. One request in flight at a
+  // time; changes made meanwhile are rendered once it returns (latest settings win).
+  const processActiveRef = useRef(handleProcessActive);
+  processActiveRef.current = handleProcessActive;
+  const liveRenderRef = useRef({ inFlight: false, queued: false });
+  const baselineRef = useRef<{ photoId: string; sig: string } | null>(null);
+
+  const runLiveRender = async () => {
+    const state = liveRenderRef.current;
+    if (state.inFlight) {
+      state.queued = true;
+      return;
+    }
+    state.inFlight = true;
+    try {
+      await processActiveRef.current({ silent: true });
+    } finally {
+      state.inFlight = false;
+      if (state.queued) {
+        state.queued = false;
+        runLiveRender();
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!activePhoto || workflowStep !== 'editor') return;
+    const baseline = baselineRef.current;
+    if (!baseline || baseline.photoId !== activePhoto.id) {
+      baselineRef.current = { photoId: activePhoto.id, sig: activeSettingsSig };
+      return;
+    }
+    if (baseline.sig === activeSettingsSig) return;
+    baselineRef.current = { photoId: activePhoto.id, sig: activeSettingsSig };
+    const timer = setTimeout(runLiveRender, 350);
+    return () => clearTimeout(timer);
+  }, [activeSettingsSig, activePhoto?.id, workflowStep]);
 
   // AI Auto-Tune and Quality Appraisal
   const handleAutoEnhanceActive = async () => {
@@ -697,9 +794,9 @@ export default function App() {
               projectId={currentProjectId}
               projectTitle={currentProjectTitle}
               activePhotoId={activePhotoId}
-              onSelectPhoto={(id) => setActivePhotoId(id)}
+              onSelectPhoto={(id) => selectPhoto(id)}
               onOpenEditor={(id) => {
-                if (id) setActivePhotoId(id);
+                if (id) selectPhoto(id);
                 setWorkflowStep('editor');
               }}
               onOpenUpload={() => setWorkflowStep('upload')}
@@ -767,6 +864,10 @@ export default function App() {
                       setCatchlightBoost={setCatchlightBoost}
                       teethWhitening={teethWhitening}
                       setTeethWhitening={setTeethWhitening}
+                      skinBrightening={skinBrightening}
+                      setSkinBrightening={setSkinBrightening}
+                      keepMoles={keepMoles}
+                      setKeepMoles={setKeepMoles}
                       looseHairCleanup={looseHairCleanup}
                       setLooseHairCleanup={setLooseHairCleanup}
                       looseHairStrength={looseHairStrength}
@@ -795,7 +896,7 @@ export default function App() {
                       backdrops={backdrops}
                       beautyPresets={beautyPresets}
                       regaliaProfiles={regaliaProfiles}
-                      onApplySettings={handleProcessActive}
+                      onApplySettings={() => handleProcessActive()}
                       onApplyToAll={handleBulkApply}
                       onAiAutoTune={handleAutoEnhanceActive}
                       isAiAutoTuning={isProcessing}
@@ -809,7 +910,7 @@ export default function App() {
                   <BatchFilmstrip
                     photos={photos}
                     activePhotoId={activePhotoId}
-                    onSelectPhoto={setActivePhotoId}
+                    onSelectPhoto={(id) => selectPhoto(id)}
                     onUploadClick={() => setWorkflowStep('upload')}
                     onProcessAll={handleBulkApply}
                     onExportZip={() => setIsExportModalOpen(true)}

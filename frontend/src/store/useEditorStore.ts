@@ -39,6 +39,8 @@ interface EditorState {
   eyeCatchlight: number;
   catchlightBoost: number; // backward-compat alias
   teethWhitening: number;
+  skinBrightening: number;
+  keepMoles: boolean;
   looseHairCleanup: boolean;
   looseHairStrength: number;
   lipColor: string;
@@ -66,6 +68,8 @@ interface EditorState {
   setEyeCatchlight: (v: number) => void;
   setCatchlightBoost: (v: number) => void;
   setTeethWhitening: (v: number) => void;
+  setSkinBrightening: (v: number) => void;
+  setKeepMoles: (keep: boolean) => void;
   setLooseHairCleanup: (enabled: boolean) => void;
   setLooseHairStrength: (v: number) => void;
   setLipColor: (c: string) => void;
@@ -132,6 +136,8 @@ export const useEditorStore = create<EditorState>((set) => ({
   eyeCatchlight: 25,
   catchlightBoost: 25,
   teethWhitening: 30,
+  skinBrightening: 0,
+  keepMoles: true,
   looseHairCleanup: true,
   looseHairStrength: 30,
   lipColor: '#d87093',
@@ -159,6 +165,8 @@ export const useEditorStore = create<EditorState>((set) => ({
   setEyeCatchlight: (v) => set({ eyeCatchlight: v, catchlightBoost: v }),
   setCatchlightBoost: (v) => set({ eyeCatchlight: v, catchlightBoost: v }),
   setTeethWhitening: (v) => set({ teethWhitening: v }),
+  setSkinBrightening: (v) => set({ skinBrightening: v }),
+  setKeepMoles: (keep) => set({ keepMoles: keep }),
   setLooseHairCleanup: (enabled) => set({ looseHairCleanup: enabled }),
   setLooseHairStrength: (v) => set({ looseHairStrength: v }),
   setLipColor: (c) => set({ lipColor: c }),
